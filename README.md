@@ -10,7 +10,7 @@ The app acts like a coach, not just a tracker. It stores check-ins, body metrics
 - React 19
 - TypeScript
 - Tailwind CSS v4
-- Local zero-config persistence via `localStorage`
+- Local zero-config persistence via `localStorage`, with Supabase auth/database sync when env vars are configured
 - Supabase/Postgres-ready schema under `supabase/migrations`
 - Deterministic coaching engine under `src/lib/coach-engine.ts`
 - Full 12-week seed program under `src/lib/seed-data.ts`
@@ -70,18 +70,21 @@ Important functions:
 
 The app intentionally does not rely on LLM calls for core safety or training decisions.
 
-## Database
+## Database and auth persistence
 
-Run the Supabase migration when wiring real auth/database persistence:
+Phase 12 adds Supabase-backed persistence without removing the zero-config `localStorage` path.
+
+Run migrations:
 
 ```bash
 supabase db push
 ```
 
-Schema file:
+Schema files:
 
 ```text
 supabase/migrations/001_greek_god_coach.sql
+supabase/migrations/002_phase12_persistence.sql
 ```
 
 Seed file:
@@ -90,7 +93,49 @@ Seed file:
 supabase/seed.sql
 ```
 
-Current local MVP persistence is browser-local so it works immediately without credentials. Supabase auth and CRUD can be wired by replacing `src/lib/storage.ts` with Supabase client calls while keeping the same domain types.
+Required env vars for Supabase sync:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+```
+
+Optional scan provider env vars from Phase 11:
+
+```bash
+GREEK_GOD_SCAN_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_SCAN_MODEL=gpt-4o-mini
+```
+
+Fallback behavior:
+
+- If either Supabase public env var is missing, the app stays in `localStorage` mode.
+- If Supabase env vars are present but no authenticated user/profile row is available, the app still saves locally.
+- If Supabase sync errors, the app catches the failure and preserves the current state in `localStorage`.
+- When a signed-in Supabase user has a matching `public.users.auth_user_id`, the app upserts premium records to Supabase and still keeps localStorage as a browser cache.
+
+Storage bucket strategy:
+
+- `progress-photos` for physique progress photos.
+- `food-scan-images` for food photo scans.
+- `nutrition-label-images` for nutrition label scans.
+
+Private storage paths should start with the Supabase auth user id, e.g. `auth-user-id/yyyy-mm-dd/file.jpg`, so the included storage RLS policy can isolate each user's media.
+
+Phase 12 schema coverage includes:
+
+- workout sessions
+- set logs
+- meals
+- meal items
+- hydration logs
+- run logs
+- food scan history
+- daily prescriptions
+- coach decision/audit logs
+- macro target history
+- storage buckets for progress photos, food scans, and nutrition labels
 
 ## Safety stance
 

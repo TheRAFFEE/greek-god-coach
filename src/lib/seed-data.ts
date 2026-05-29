@@ -1,4 +1,4 @@
-import type { AppState, DailyCheckIn, Exercise, MacroTarget, NutritionLog, UserProfile, Workout } from "./types";
+import type { AppState, DailyCheckIn, Exercise, FoodScanLog, MacroTarget, Meal, NutritionLog, RunLog, UserProfile, Workout } from "./types";
 
 const userId = "demo-user";
 const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -122,16 +122,30 @@ export const sampleNutritionLogs: NutritionLog[] = dates.map((date, i) => ({
   notes: "",
 }));
 
+export const sampleMeals: Meal[] = [];
+
+export const sampleFoodScans: FoodScanLog[] = [];
+
+export const sampleRunLogs: RunLog[] = [];
+
 export function createInitialState(): AppState {
   return {
     user: demoUser,
+    appMode: "coach",
     currentWeek: 1,
     startDate: "2026-05-24",
     checkIns: sampleCheckIns,
     bodyMetrics: sampleCheckIns.map((c, i) => ({ id: `metric-${i + 1}`, userId, date: c.date, weight: c.weight, waist: Math.round((38 - i * 0.035) * 10) / 10, chest: 43, arms: 16.2, thighs: 24, hips: 40, notes: "" })),
     photos: [],
     nutritionLogs: sampleNutritionLogs,
+    meals: sampleMeals,
+    foodScans: sampleFoodScans,
+    runLogs: sampleRunLogs,
     exerciseLogs: [],
+    workoutSessions: [],
+    setLogs: [],
+    workoutSummaries: [],
+    postWorkoutRecommendations: [],
     adjustments: [],
     macroTargets,
   };
