@@ -45,7 +45,8 @@ import { createInitialState } from "./seed-data";
 import { migrateAppState } from "./storage";
 import type { DailyCheckIn, ExerciseLog, NutritionLog, BodyMetric, Workout, WorkoutSession, SetLog, Meal, RunLog, FoodScanResult } from "./types";
 
-const checkIn = (overrides: Partial<DailyCheckIn> = {}): DailyCheckIn => ({
+const checkIn = (overrides: Partial<DailyCheckIn> = {}): DailyCheckIn => {
+  const entry: DailyCheckIn = {
   id: "c1",
   userId: "demo-user",
   date: "2026-05-24",
@@ -65,10 +66,12 @@ const checkIn = (overrides: Partial<DailyCheckIn> = {}): DailyCheckIn => ({
   painLocation: "",
   painSeverity: 0,
   workoutCompleted: true,
+  runCompleted: true,
   macrosHit: true,
   notes: "",
-  ...overrides,
-});
+  };
+  return { ...entry, ...overrides, runCompleted: overrides.runCompleted ?? entry.runCompleted };
+};
 
 
   test("returns green when recovery markers are strong", () => {

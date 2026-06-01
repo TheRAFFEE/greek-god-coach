@@ -82,7 +82,7 @@ export function migrateAppState(raw: unknown): AppState {
     appMode: isAppMode(raw.appMode) ? raw.appMode : "coach",
     currentWeek: asNumber(raw.currentWeek, defaults.currentWeek),
     startDate: asString(raw.startDate, defaults.startDate),
-    checkIns: asArray(raw.checkIns),
+    checkIns: asArray<Partial<import("./types").DailyCheckIn>>(raw.checkIns).map((entry) => ({ ...entry, runCompleted: typeof entry.runCompleted === "boolean" ? entry.runCompleted : false })) as import("./types").DailyCheckIn[],
     bodyMetrics: asArray(raw.bodyMetrics),
     photos: asArray(raw.photos),
     nutritionLogs: asArray(raw.nutritionLogs),

@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "rm -rf .tmp-test && tsc -p tsconfig.test.json && node --test .tmp-test/src/lib/coach-engine.test.js"
+    "test": "rm -rf .tmp-test && tsc -p tsconfig.test.json && node --test .tmp-test/src/lib/*.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.106.1",

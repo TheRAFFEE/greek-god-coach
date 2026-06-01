@@ -40,6 +40,7 @@ export interface DailyCheckIn {
   painLocation: string;
   painSeverity: number;
   workoutCompleted: boolean;
+  runCompleted: boolean;
   macrosHit: boolean;
   notes: string;
 }
@@ -198,11 +199,13 @@ export interface NextMealMacroSuggestion {
 }
 
 export type RunningRecommendationAction = "Progress" | "Hold" | "Regress";
+export type RunType = "easy" | "speed" | "tempo" | "long run" | "race";
 
 export interface RunLog {
   id: string;
   userId: string;
   date: string;
+  runType?: RunType;
   plannedDistance: number;
   actualDistance: number;
   durationMinutes: number;
@@ -212,7 +215,9 @@ export interface RunLog {
   rpe: number;
   zone2Compliance: number;
   completed: boolean;
+  walkBreaks?: boolean;
   pain: boolean;
+  painScore?: number;
   painLocation: string;
   notes: string;
 }

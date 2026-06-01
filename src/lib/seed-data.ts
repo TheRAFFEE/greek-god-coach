@@ -103,6 +103,7 @@ export const sampleCheckIns: DailyCheckIn[] = dates.map((date, i) => ({
   painLocation: "",
   painSeverity: 0,
   workoutCompleted: i % 7 !== 6,
+  runCompleted: i % 4 !== 3,
   macrosHit: i !== 5 && i !== 9,
   notes: i === 9 ? "Felt beat up; good day to modify volume." : "",
 }));
