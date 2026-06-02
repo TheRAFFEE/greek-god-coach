@@ -30,6 +30,10 @@ import type {
   WorkoutSession,
   WorkoutSummary,
 } from "./types";
+import { evaluateReadiness, readinessInputFromDailyCheckIn } from "./readiness-engine";
+import { calculateMacroAdherence, calculateMacroProgress as calculateNutritionEngineProgress, legacyMacroTargetToNutritionTarget, nutritionLogsToMealLogs } from "./nutrition-engine";
+import { evaluateRunning, type RunningEngineInput, type RunningEngineResult } from "./running-engine";
+import { buildWorkoutEngineInputFromSession, evaluateWorkout, type WorkoutEngineInput, type WorkoutEngineResult, type WorkoutProgressionDecision } from "./workout-engine";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const avg = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0);
@@ -235,37 +239,13 @@ export function mapAppStateToSupabaseTableCounts(state: AppState): Record<string
 }
 
 export function calculateReadiness(checkIn: DailyCheckIn, baseline: { restingHr: number; hrv: number }): ReadinessScore {
-  let score = 100;
-  const reasons: string[] = [];
-  const subtract = (points: number, reason: string) => {
-    score -= points;
-    reasons.push(reason);
+  const readiness = evaluateReadiness(readinessInputFromDailyCheckIn(checkIn, baseline));
+  return {
+    score: readiness.score,
+    status: readiness.status,
+    reason: readiness.reason,
+    recommendation: readiness.recommendation,
   };
-
-  if (checkIn.sleepHours < 6) subtract(20, "sleep under 6 hours");
-  else if (checkIn.sleepHours < 7) subtract(10, "sleep 6-7 hours");
-  if (checkIn.sleepQuality <= 4) subtract(10, "low sleep quality");
-  if (checkIn.soreness >= 8) subtract(25, "severe soreness");
-  else if (checkIn.soreness >= 6) subtract(10, "moderate soreness");
-  if (checkIn.energy <= 3) subtract(20, "low energy");
-  else if (checkIn.energy <= 5) subtract(10, "moderate energy");
-  if (checkIn.stress >= 8) subtract(10, "high stress");
-  if (checkIn.restingHr > baseline.restingHr + 8) subtract(15, "resting HR elevated");
-  if (baseline.hrv > 0 && checkIn.hrv < baseline.hrv * 0.8) subtract(15, "HRV down over 20%");
-  if (checkIn.pain && checkIn.painSeverity >= 6) subtract(35, "significant pain");
-  else if (checkIn.pain && checkIn.painSeverity >= 4) subtract(15, "moderate pain");
-  if (checkIn.alcohol) subtract(checkIn.sleepQuality <= 5 ? 15 : 5, "alcohol yesterday");
-
-  const significantPain = checkIn.pain && checkIn.painSeverity >= 6;
-  const finalScore = clamp(round0(significantPain ? Math.min(score, 59) : score), 0, 100);
-  const status: ReadinessStatus = finalScore >= 80 ? "Green" : finalScore >= 60 ? "Yellow" : "Red";
-  const recommendation = status === "Green"
-    ? "Complete the planned workout. Progress weights or reps if form is solid and RPE stays at 8 or less. Conditioning allowed."
-    : status === "Yellow"
-      ? "Keep the workout but reduce volume 10-25%, avoid max-effort sets, keep Zone 2 conversational, and replace sprinting with incline walk or easy bike if needed."
-      : "No heavy lifting, sprinting, or hard intervals. Replace today with walking, mobility, easy Zone 2, hydration, sleep, and recovery. Seek professional evaluation for persistent concerning symptoms.";
-
-  return { score: finalScore, status, reason: reasons.length ? reasons.join("; ") : "Recovery markers are within normal range", recommendation };
 }
 
 export function calculateWeightTrend(metrics: BodyMetric[]) {
@@ -405,6 +385,99 @@ export function calculateRunTrends(runLogs: RunLog[]): RunTrends {
   };
 }
 
+export function buildRunningEngineInputForRecommendation(input: {
+  runLogs: RunLog[];
+  nextDayReadiness: ReadinessStatus;
+  plannedDistance: number;
+  runType: string;
+  currentWeeklyMileage: number;
+  previousWeeklyMileage: number;
+  evaluationDate?: string;
+}): RunningEngineInput {
+  const sorted = [...safeArray(input.runLogs)].sort((a, b) => a.date.localeCompare(b.date));
+  const evaluationDate = input.evaluationDate ?? sorted.at(-1)?.date ?? new Date().toISOString().slice(0, 10);
+  const readinessStatus = input.nextDayReadiness;
+  return {
+    generatedAt: `${evaluationDate}T12:00:00.000Z`,
+    evaluationDate,
+    race: { raceDate: "2027-01-17", targetFinishMinutes: 118, targetPaceSecondsPerMile: 540, distanceMiles: 13.1 },
+    runLogs: sorted.map((run) => ({
+      id: run.id,
+      date: run.date,
+      runType: run.runType ?? input.runType,
+      plannedDistance: run.plannedDistance,
+      actualDistance: run.actualDistance,
+      durationMinutes: run.durationMinutes,
+      averagePace: run.averagePace,
+      averagePaceSecondsPerMile: Math.round(run.averagePace * 60),
+      averageHr: run.averageHr,
+      maxHr: run.maxHr,
+      rpe: run.rpe,
+      zone2Compliance: run.zone2Compliance,
+      completed: run.completed,
+      walkBreaks: run.walkBreaks,
+      pain: run.pain,
+      painScore: run.painScore,
+      painLocation: run.painLocation,
+      notes: run.notes,
+    })),
+    currentWeek: {
+      startDate: sorted.at(0)?.date ?? evaluationDate,
+      endDate: evaluationDate,
+      weeklyMileage: input.currentWeeklyMileage,
+      rolling7DayMileage: input.currentWeeklyMileage,
+      previousWeeklyMileage: input.previousWeeklyMileage,
+      runningDaysPlanned: Math.max(sorted.length, 1),
+      runningDaysCompleted: sorted.filter((run) => run.completed).length,
+    },
+    readiness: {
+      status: readinessStatus,
+      score: readinessStatus === "Green" ? 84 : readinessStatus === "Yellow" ? 64 : 35,
+      confidence: "Medium",
+    },
+  };
+}
+
+function runningEngineResultToLegacyRecommendation(result: RunningEngineResult, input: {
+  plannedDistance: number;
+  runType: string;
+  runLogs?: RunLog[];
+}): RunningRecommendation {
+  const action = result.progression.action;
+  const recommendedDistance = action === "Recovery Focus"
+    ? 0
+    : action === "Progress"
+      ? Math.round((input.plannedDistance + (/long/i.test(input.runType) ? 1 : 0.5)) * 2) / 2
+      : action === "Regress"
+        ? Math.max(0, result.progression.recommendedLongRunDistance ?? Math.round(input.plannedDistance * 0.8 * 2) / 2)
+        : input.plannedDistance;
+  const reasons = [
+    `Running Engine V2 action: ${action}.`,
+    result.progression.reason,
+    ...result.progression.explanation.primaryDrivers,
+  ];
+  const runWarnings = safeArray(input.runLogs).flatMap((run) => {
+    const warnings: string[] = [];
+    if (run.pain || (run.painScore ?? 0) > 0) warnings.push(`Pain reported${run.painLocation ? `: ${run.painLocation}` : ""}.`);
+    if (/long/i.test(input.runType) && (run.plannedDistance >= 5 || run.actualDistance >= 5) && (!run.completed || run.actualDistance < run.plannedDistance * 0.9)) warnings.push("Long run failed or fell materially short of plan.");
+    return warnings;
+  });
+  const warnings = [
+    ...result.readiness.blockers,
+    ...result.progression.explanation.blockers,
+    ...(/long/i.test(input.runType) && result.longRunStatus.status !== "strong" ? [result.longRunStatus.reason] : []),
+    ...runWarnings,
+  ].filter((warning, index, list) => warning && list.indexOf(warning) === index);
+  const message = action === "Progress"
+    ? `Increase the next ${input.runType} to ${recommendedDistance} miles while keeping Zone 2 conversational.`
+    : action === "Hold"
+      ? `Hold the next ${input.runType} at ${recommendedDistance} miles; Running Engine V2 does not support progression yet.`
+      : action === "Regress"
+        ? `Reduce the next ${input.runType} to ${recommendedDistance} miles and keep it easy until pain/fatigue clears.`
+        : `No run today. Recovery focus: replace the next ${input.runType} with walking, mobility, or rest until pain/readiness clears.`;
+  return { action, recommendedDistance, message, reasons, warnings };
+}
+
 export function generateRunningRecommendation(input: {
   runLogs: RunLog[];
   nextDayReadiness: ReadinessStatus;
@@ -413,48 +486,9 @@ export function generateRunningRecommendation(input: {
   currentWeeklyMileage: number;
   previousWeeklyMileage: number;
 }): RunningRecommendation {
-  const sorted = [...safeArray(input.runLogs)].sort((a, b) => a.date.localeCompare(b.date));
-  const latest = sorted.at(-1);
-  const previous = sorted.at(-2);
-  const reasons: string[] = [];
-  const warnings: string[] = [];
-  const isLongRun = /long/i.test(input.runType) || input.plannedDistance >= 5;
-  if (!latest) {
-    return { action: "Hold", recommendedDistance: input.plannedDistance, message: `Hold the planned ${input.plannedDistance} mile run until a baseline run is logged.`, reasons: ["No running history yet."], warnings };
-  }
-
-  const weeklyIncrease = input.previousWeeklyMileage > 0 ? ((input.currentWeeklyMileage - input.previousWeeklyMileage) / input.previousWeeklyMileage) * 100 : 0;
-  const paceHrWorsened = Boolean(previous && latest.averagePace > previous.averagePace + 0.3 && latest.averageHr > previous.averageHr + 8);
-  const poorRun = !latest.completed || latest.rpe > 6 || latest.zone2Compliance < 75 || paceHrWorsened;
-  const previousPoorRun = Boolean(previous && (!previous.completed || previous.rpe > 6 || previous.zone2Compliance < 75));
-  const longRunReference = isLongRun ? [...sorted].reverse().find((run) => run.plannedDistance >= 5 || run.actualDistance >= 5) : latest;
-  const longRunFailed = Boolean(isLongRun && longRunReference && (!longRunReference.completed || longRunReference.actualDistance < longRunReference.plannedDistance * 0.9));
-
-  if (latest.completed) reasons.push("Latest run was completed."); else reasons.push("Latest run was incomplete.");
-  if (latest.rpe <= 6) reasons.push("Zone 2 effort stayed at RPE 6 or lower."); else reasons.push("RPE was too high for Zone 2 progression.");
-  if (latest.zone2Compliance >= 80) reasons.push("Zone 2 compliance was strong."); else reasons.push("Zone 2 compliance was low.");
-  if (weeklyIncrease <= 10) reasons.push("Weekly mileage increase is reasonable."); else reasons.push("Weekly mileage increase is above the conservative 10% cap.");
-  if (paceHrWorsened) reasons.push("Pace/HR relationship worsened versus the prior run.");
-
-  if (latest.pain) warnings.push(`Pain reported${latest.painLocation ? `: ${latest.painLocation}` : ""}.`);
-  if (input.nextDayReadiness === "Red") warnings.push("Next-day readiness was Red after running.");
-  if (longRunFailed) warnings.push("Long run failed or fell materially short of plan.");
-
-  if (latest.pain || input.nextDayReadiness === "Red") {
-    return { action: "Regress", recommendedDistance: 0, message: `No run today. Replace the next ${input.runType} with walking or mobility until pain/readiness clears.`, reasons, warnings };
-  }
-
-  if ((poorRun && previousPoorRun) || longRunFailed) {
-    const recommendedDistance = Math.max(1, Math.round(input.plannedDistance * 0.8 * 2) / 2);
-    return { action: "Regress", recommendedDistance, message: `Reduce the next ${input.runType} to ${recommendedDistance} miles and keep it easy until pain/fatigue clears.`, reasons, warnings };
-  }
-
-  if (poorRun || input.nextDayReadiness === "Yellow" || weeklyIncrease > 10) {
-    return { action: "Hold", recommendedDistance: input.plannedDistance, message: `Hold the next ${input.runType} at ${input.plannedDistance} miles; do not progress until the next clean run.`, reasons, warnings };
-  }
-
-  const recommendedDistance = Math.round((input.plannedDistance + (isLongRun ? 1 : 0.5)) * 2) / 2;
-  return { action: "Progress", recommendedDistance, message: `Increase the next ${input.runType} to ${recommendedDistance} miles while keeping Zone 2 conversational.`, reasons, warnings };
+  const engineInput = buildRunningEngineInputForRecommendation(input);
+  const engineResult = evaluateRunning(engineInput);
+  return runningEngineResultToLegacyRecommendation(engineResult, input);
 }
 
 export function calculateMealTotals(meals: Meal[], date: string): Omit<NutritionLog, "id" | "userId" | "date" | "alcohol" | "notes"> {
@@ -503,19 +537,20 @@ export function syncNutritionLogFromMeals(input: { userId: string; date: string;
 }
 
 export function calculateNutritionProgress(log: NutritionLog, target: MacroTarget): NutritionProgress {
-  const item = (consumed: number, targetValue: number) => ({
-    target: targetValue,
-    consumed,
-    remaining: Math.max(0, round0(targetValue - consumed)),
-    percent: targetValue > 0 ? clamp(round0((consumed / targetValue) * 100), 0, 100) : 0,
+  const progress = calculateNutritionEngineProgress(log, legacyMacroTargetToNutritionTarget(target, log.date));
+  const item = (value: typeof progress.calories) => ({
+    target: value.target,
+    consumed: value.consumed,
+    remaining: value.remaining,
+    percent: value.percentComplete,
   });
   return {
-    calories: item(log.calories, target.calories),
-    protein: item(log.protein, target.protein),
-    carbs: item(log.carbs, target.carbs),
-    fat: item(log.fat, target.fat),
-    fiber: item(log.fiber, target.fiber),
-    water: item(log.water, target.water),
+    calories: item(progress.calories),
+    protein: item(progress.protein),
+    carbs: item(progress.carbs),
+    fat: item(progress.fat),
+    fiber: item(progress.fiber),
+    water: item(progress.water),
   };
 }
 
@@ -559,16 +594,15 @@ export function suggestNextMealMacros(log: NutritionLog, target: MacroTarget, me
 
 export function calculateAdherence(logs: NutritionLog[], target: MacroTarget): number {
   if (!logs.length) return 0;
-  const dayScores = logs.map((log) => {
-    const calorieScore = 1 - Math.min(Math.abs(log.calories - target.calories) / Math.max(target.calories * 0.18, 1), 1);
-    const proteinScore = log.protein >= target.protein * 0.9 ? 1 : log.protein / Math.max(target.protein, 1);
-    const carbScore = 1 - Math.min(Math.abs(log.carbs - target.carbs) / Math.max(target.carbs * 0.35, 1), 1);
-    const fatScore = 1 - Math.min(Math.abs(log.fat - target.fat) / Math.max(target.fat * 0.35, 1), 1);
-    const fiberScore = log.fiber >= target.fiber * 0.8 ? 1 : log.fiber / Math.max(target.fiber, 1);
-    const alcoholPenalty = log.alcohol > 0 ? 0.08 : 0;
-    return clamp((calorieScore * 0.35 + proteinScore * 0.3 + carbScore * 0.15 + fatScore * 0.1 + fiberScore * 0.1 - alcoholPenalty) * 100, 0, 100);
+  const sortedLogs = [...logs].sort((a, b) => a.date.localeCompare(b.date));
+  const nutritionTargets = sortedLogs.map((log) => legacyMacroTargetToNutritionTarget(target, log.date));
+  const adherence = calculateMacroAdherence({
+    dateRange: { startDate: sortedLogs[0].date, endDate: sortedLogs[sortedLogs.length - 1].date },
+    mealLogs: nutritionLogsToMealLogs(sortedLogs),
+    nutritionTargets,
+    alcoholDays: sortedLogs.filter((log) => log.alcohol > 0).length,
   });
-  return round0(avg(dayScores));
+  return adherence.dailyAdherence;
 }
 
 export function recommendMacroAdjustment(input: {
@@ -849,116 +883,59 @@ export function getRecommendedStartingWeight(exerciseId: string, history: SetLog
 const firstTargetRepCount = (targetReps: string) => parseInt(targetReps.match(/\d+/)?.[0] ?? "0", 10);
 const roundToNearestFive = (value: number) => Math.round(value / 5) * 5;
 
-export function generateNextSetRecommendation(input: { setLog: SetLog; readinessStatus: ReadinessStatus }): CoachDecision {
-  const { setLog, readinessStatus } = input;
+export function buildWorkoutEngineInputForNextSet(input: { setLog: SetLog; readinessStatus: ReadinessStatus }): WorkoutEngineInput {
+  const session: WorkoutSession = {
+    id: input.setLog.sessionId,
+    userId: input.setLog.userId,
+    workoutId: input.setLog.workoutId,
+    workoutTitle: "Set-by-set workout",
+    mode: "coach",
+    startedAt: input.setLog.completedAt,
+    endedAt: input.setLog.completedAt,
+    status: "completed",
+    currentExerciseIndex: 0,
+    currentSetNumber: input.setLog.setNumber,
+    setLogs: [input.setLog],
+  };
+  const recovery = input.readinessStatus === "Red" ? { sorenessLevel: 9, sleepHours: 4.5 } : input.readinessStatus === "Yellow" ? { sorenessLevel: 7, sleepHours: 6 } : { sorenessLevel: 4, sleepHours: 7 };
+  const engineInput = buildWorkoutEngineInputFromSession({ session, recovery });
+  return {
+    ...engineInput,
+    readiness: {
+      ...(engineInput.readiness ?? { score: 80 }),
+      status: input.readinessStatus,
+      score: input.readinessStatus === "Green" ? 85 : input.readinessStatus === "Yellow" ? 62 : 35,
+    },
+    workoutSessions: input.readinessStatus === "Green" && input.setLog.rpe <= 7 && !input.setLog.pain && input.setLog.formQuality === "solid" ? [{ id: "prior-clean", date: "2026-05-25", workoutId: input.setLog.workoutId, workoutTitle: "Prior", status: "completed", setLogs: engineInput.setLogs.map((set) => ({ ...set, id: `${set.id}-prior`, sessionId: "prior-clean", weightUsed: Math.max(0, set.weightUsed - 5), completedAt: "2026-05-25T12:00:00.000Z", date: "2026-05-25" })) }, ...engineInput.workoutSessions] : engineInput.workoutSessions,
+  };
+}
+
+export function workoutEngineResultToCoachDecision(result: WorkoutEngineResult, setLog: SetLog, readinessStatus: ReadinessStatus): CoachDecision {
+  const exercise = result.exerciseDecisions.find((item) => item.exerciseId === setLog.exerciseId) ?? result.exerciseDecisions[0];
   const targetRepCount = firstTargetRepCount(setLog.targetReps);
   const hitTargetReps = targetRepCount > 0 ? setLog.repsCompleted >= targetRepCount : setLog.repsCompleted > 0;
   const sameWeight = Math.max(0, roundToNearestFive(setLog.weightUsed));
   const reducedWeight = Math.max(0, roundToNearestFive(setLog.weightUsed * 0.95));
   const increasedWeight = Math.max(0, roundToNearestFive(setLog.weightUsed + 5));
-  const nextReps = setLog.targetReps;
-  const targetRpe = Math.min(setLog.targetRpe, readinessStatus === "Yellow" ? 7 : 8);
-  const base: Omit<CoachDecision, "action" | "message" | "nextWeight" | "restSeconds" | "reason"> = {
+  const action = result.overallDecision;
+  const base = {
     exerciseId: setLog.exerciseId,
-    nextReps,
-    targetRpe,
+    nextReps: setLog.targetReps,
+    targetRpe: Math.min(setLog.targetRpe, readinessStatus === "Yellow" ? 7 : 8),
     cue: "Keep reps crisp, stop before grinders, and prioritize pain-free form.",
     recommendedWeight: sameWeight,
   };
+  if (readinessStatus === "Red" || action === "Deload") return { ...base, action: "stop", message: readinessStatus === "Red" ? "Stop the heavy workout. Red readiness means active heavy work should not proceed today." : "Stop heavy work and deload. Workout Engine V2 detected excessive fatigue risk.", nextWeight: 0, restSeconds: 300, reason: `Workout Engine V2: ${result.workoutRecommendation.reason}`, recommendedWeight: 0 };
+  if (action === "Substitute") return { ...base, action: "stop", message: "Stop this movement. Substitute a pain-free variation before doing more work.", nextWeight: 0, restSeconds: 180, reason: `Workout Engine V2: ${exercise?.reason ?? result.workoutRecommendation.reason}`, recommendedWeight: 0 };
+  if (action === "Reduce" || !hitTargetReps || setLog.formQuality !== "solid" || setLog.rpe >= 9) return { ...base, action: "reduce", message: setLog.formQuality !== "solid" ? "Repeat with better mechanics at a lower load. Form quality is the limiter for the next set." : setLog.rpe >= 9 ? "Do not increase. Repeat or reduce slightly, and take extra rest before the next set." : "reduce load 5-10%, take more rest, and hit clean target reps next set.", nextWeight: reducedWeight, restSeconds: 180, reason: `Workout Engine V2: ${exercise?.reason ?? result.workoutRecommendation.reason}`, recommendedWeight: reducedWeight };
+  if (readinessStatus === "Yellow" || setLog.rpe > 7) return { ...base, action: "repeat", message: readinessStatus === "Yellow" ? "Repeat the same weight. Yellow readiness caps intensity, even though the last set was easy." : "Repeat the same weight and reps. Effort is in the productive range.", nextWeight: sameWeight, restSeconds: readinessStatus === "Yellow" ? 150 : 120, reason: `Workout Engine V2: ${readinessStatus === "Yellow" ? "Yellow readiness calls for conservative work. " : ""}Target reps were hit at RPE ${setLog.rpe}, so hold load steady. ${exercise?.reason ?? result.workoutRecommendation.reason}`, recommendedWeight: sameWeight };
+  if (action === "Progress") return { ...base, action: "increase", message: "You hit target reps with room in reserve. Slightly increase or repeat if you want the safer option.", nextWeight: increasedWeight, restSeconds: 120, reason: `Workout Engine V2: Target reps were hit at RPE ${setLog.rpe}, so a small increase is allowed. ${exercise?.reason ?? result.workoutRecommendation.reason}`, recommendedWeight: increasedWeight };
+  return { ...base, action: "repeat", message: "Repeat the same weight and reps. Effort is in the productive range.", nextWeight: sameWeight, restSeconds: 120, reason: `Workout Engine V2: ${exercise?.reason ?? result.workoutRecommendation.reason}`, recommendedWeight: sameWeight };
+}
 
-  if (readinessStatus === "Red") {
-    return {
-      ...base,
-      action: "stop",
-      message: "Stop the heavy workout. Red readiness means active heavy work should not proceed today.",
-      nextWeight: 0,
-      restSeconds: 300,
-      reason: "Readiness is Red, so the safest deterministic recommendation is recovery work instead of another work set.",
-      recommendedWeight: 0,
-    };
-  }
-
-  if (setLog.pain) {
-    return {
-      ...base,
-      action: "stop",
-      message: "Stop this movement. If training continues, substitute a pain-free variation or reduce load substantially.",
-      nextWeight: 0,
-      restSeconds: 180,
-      reason: "Pain was reported, so there is no progression recommendation.",
-      recommendedWeight: 0,
-    };
-  }
-
-  if (setLog.formQuality === "missed" || setLog.formQuality === "minor breakdown") {
-    return {
-      ...base,
-      action: "reduce",
-      message: "Repeat with better mechanics at a lower load. Form quality is the limiter for the next set.",
-      nextWeight: reducedWeight,
-      restSeconds: 180,
-      reason: `Form quality was ${setLog.formQuality}, so reduce load before chasing progression.`,
-      recommendedWeight: reducedWeight,
-    };
-  }
-
-  if (!hitTargetReps) {
-    return {
-      ...base,
-      action: "reduce",
-      message: "reduce load 5-10%, take more rest, and hit clean target reps next set.",
-      nextWeight: reducedWeight,
-      restSeconds: 180,
-      reason: `Completed ${setLog.repsCompleted} reps against a ${setLog.targetReps} target, so reduce load and increase rest.`,
-      recommendedWeight: reducedWeight,
-    };
-  }
-
-  if (setLog.rpe >= 9) {
-    return {
-      ...base,
-      action: "reduce",
-      message: "Do not increase. Repeat or reduce slightly, and take extra rest before the next set.",
-      nextWeight: reducedWeight,
-      restSeconds: 180,
-      reason: `Target reps were hit, but RPE ${setLog.rpe} is too close to max effort.`,
-      recommendedWeight: reducedWeight,
-    };
-  }
-
-  if (setLog.rpe > 7 && setLog.rpe <= 8) {
-    return {
-      ...base,
-      action: "repeat",
-      message: "Repeat the same weight and reps. Effort is in the productive range.",
-      nextWeight: sameWeight,
-      restSeconds: readinessStatus === "Yellow" ? 150 : 120,
-      reason: `Target reps were hit at RPE ${setLog.rpe}, so hold load steady.`,
-      recommendedWeight: sameWeight,
-    };
-  }
-
-  if (readinessStatus === "Yellow") {
-    return {
-      ...base,
-      action: "repeat",
-      message: "Repeat the same weight. Yellow readiness caps intensity, even though the last set was easy.",
-      nextWeight: sameWeight,
-      restSeconds: 150,
-      reason: "Yellow readiness calls for conservative work and avoids aggressive increases.",
-      recommendedWeight: sameWeight,
-    };
-  }
-
-  return {
-    ...base,
-    action: "increase",
-    message: "You hit target reps with room in reserve. Slightly increase or repeat if you want the safer option.",
-    nextWeight: increasedWeight,
-    restSeconds: 120,
-    reason: `Target reps were hit at RPE ${setLog.rpe}, so a small increase is allowed.`,
-    recommendedWeight: increasedWeight,
-  };
+export function generateNextSetRecommendation(input: { setLog: SetLog; readinessStatus: ReadinessStatus }): CoachDecision {
+  const result = evaluateWorkout(buildWorkoutEngineInputForNextSet(input));
+  return workoutEngineResultToCoachDecision(result, input.setLog, input.readinessStatus);
 }
 
 export function generatePostWorkoutAnalysis(input: { session: WorkoutSession; workout: Workout; completedAt?: string }): WorkoutSummary {
@@ -985,24 +962,25 @@ export function generatePostWorkoutAnalysis(input: { session: WorkoutSession; wo
   const poorFormFlags = logs.filter((log) => log.formQuality !== "solid");
   const bestSets = [...logs].sort((a, b) => (b.weightUsed * b.repsCompleted) - (a.weightUsed * a.repsCompleted)).slice(0, 3);
 
-  const recommendations: PostWorkoutRecommendation[] = workout.exercises.flatMap((exercise): PostWorkoutRecommendation[] => {
-    const exerciseLogs = logs.filter((log) => log.exerciseId === exercise.id);
-    if (!exerciseLogs.length) return [];
-    const exercisePain = exerciseLogs.some((log) => log.pain);
-    const exerciseMissed = exerciseLogs.some((log) => {
-      const target = firstTargetRepCount(log.targetReps);
-      return target > 0 && log.repsCompleted < target;
-    });
-    const exerciseHighRpe = exerciseLogs.some((log) => log.rpe >= 9);
-    const exercisePoorForm = exerciseLogs.filter((log) => log.formQuality !== "solid").length;
-    const cleanCompletion = !exercisePain && !exerciseMissed && !exerciseHighRpe && exercisePoorForm === 0 && exerciseLogs.every((log) => log.rpe <= 8);
-    const base = { sessionId: session.id, workoutId: workout.id, exerciseId: exercise.id, exerciseName: exercise.name, createdAt: completedAt };
-    if (exercisePain) return [{ ...base, action: "substitute" as const, message: `Use a pain-free substitute for ${exercise.name} next time.`, reason: "Pain was reported during this exercise." }];
-    if (exerciseMissed || exercisePoorForm > 0) return [{ ...base, action: "reduce" as const, message: `Repeat or reduce ${exercise.name} next time.`, reason: exerciseMissed ? "Target reps were missed." : "Form quality broke down." }];
-    if (exerciseHighRpe) return [{ ...base, action: "repeat" as const, message: `Repeat ${exercise.name} next time before adding load.`, reason: "Completed work reached RPE 9-10." }];
-    if (cleanCompletion) return [{ ...base, action: "progress" as const, message: `Progress ${exercise.name} next time with a small load or rep increase.`, reason: "All prescribed work was completed at RPE 8 or lower with no pain." }];
-    return [{ ...base, action: "repeat" as const, message: `Repeat ${exercise.name} next time and collect a cleaner signal.`, reason: "Workout result was mixed." }];
+  const workoutEngineInput = buildWorkoutEngineInputFromSession({ session, recovery: { sorenessLevel: 4, sleepHours: 7 } });
+  const workoutEngineResult = evaluateWorkout({
+    ...workoutEngineInput,
+    exerciseCatalog: workout.exercises.map((exercise) => {
+      const primary = /squat|leg|rdl|lunge|lower/i.test(`${exercise.name} ${exercise.category}`) ? "legs" : /row|pull|back/i.test(`${exercise.name} ${exercise.category}`) ? "back" : /press|raise|shoulder/i.test(`${exercise.name} ${exercise.category}`) ? "shoulders" : /curl|tri|bi|arm/i.test(`${exercise.name} ${exercise.category}`) ? "arms" : /plank|core|ab/i.test(`${exercise.name} ${exercise.category}`) ? "core" : "chest";
+      return { id: exercise.id, name: exercise.name, primaryMuscleGroup: primary, secondaryMuscleGroups: primary === "chest" ? ["shoulders", "arms"] : primary === "back" ? ["arms"] : primary === "legs" ? ["core"] : [], movementPattern: "other" as const, progressionType: "load" as const, substitutionIds: [`${exercise.id}-substitute`] };
+    }),
   });
+  const actionMap: Record<WorkoutProgressionDecision, PostWorkoutRecommendation["action"]> = { Progress: "progress", Repeat: "repeat", Reduce: "reduce", Deload: "reduce-volume", Substitute: "substitute" };
+  const recommendations: PostWorkoutRecommendation[] = workoutEngineResult.exerciseDecisions.map((decision) => ({
+    sessionId: session.id,
+    workoutId: workout.id,
+    exerciseId: decision.exerciseId,
+    exerciseName: decision.exerciseName,
+    action: actionMap[decision.action],
+    message: decision.action === "Progress" ? `Progress ${decision.exerciseName} next time with a small load or rep increase.` : decision.action === "Substitute" ? `Use a pain-free substitute for ${decision.exerciseName} next time.` : decision.action === "Reduce" ? `Repeat or reduce ${decision.exerciseName} next time.` : decision.action === "Deload" ? `Deload ${decision.exerciseName} next time.` : `Repeat ${decision.exerciseName} next time before adding load.`,
+    reason: `Workout Engine V2: ${decision.reason}`,
+    createdAt: completedAt,
+  }));
 
   if (poorFormFlags.length >= 2) {
     recommendations.push({
@@ -1015,7 +993,7 @@ export function generatePostWorkoutAnalysis(input: { session: WorkoutSession; wo
     });
   }
 
-  const coachSummary = painFlags.length
+  const coachSummary = `Workout Engine V2 recommends ${workoutEngineResult.overallDecision}. ${painFlags.length
     ? "Pain was flagged. Prioritize substitutions and pain-free ranges next time."
     : missedRepFlags.length
       ? "Missed reps showed the load or fatigue was too high. Repeat or reduce next time."
@@ -1023,7 +1001,7 @@ export function generatePostWorkoutAnalysis(input: { session: WorkoutSession; wo
         ? "Workout was completed, but high RPE means repeat before progressing."
         : poorFormFlags.length >= 2
           ? "Multiple form flags suggest reducing volume next time."
-          : "Progress next time: all work was completed at RPE 8 or lower with no pain.";
+          : "Progress next time: all work was completed at RPE 8 or lower with no pain."}`;
 
   return {
     sessionId: session.id,

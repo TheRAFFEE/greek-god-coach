@@ -1,4 +1,5 @@
 import type { AppState, PostWorkoutRecommendation, SetLog, WorkoutSession, WorkoutSummary } from "./types";
+import { buildWorkoutEngineInputFromSession, evaluateWorkout, type WorkoutEngineResult, type WorkoutProgressionDecision } from "./workout-engine";
 
 export type WorkoutLoggerType = "upper strength" | "lower strength" | "Greek god hypertrophy" | "recovery";
 export type WorkoutProgressionAction = "progress" | "repeat" | "reduce-volume";
@@ -77,6 +78,30 @@ export function buildWorkoutLoggerSession(input: WorkoutLoggerInput): WorkoutSes
   };
 }
 
+export function buildWorkoutEngineInputForWorkoutLogger(session: WorkoutSession, recovery: RecoveryContext) {
+  return buildWorkoutEngineInputFromSession({ session, recovery });
+}
+
+function workoutEngineDecisionToLegacyAction(action: WorkoutProgressionDecision): WorkoutProgressionAction | "substitute" {
+  if (action === "Progress") return "progress";
+  if (action === "Repeat") return "repeat";
+  if (action === "Substitute") return "substitute";
+  if (action === "Reduce") return "repeat";
+  return "reduce-volume";
+}
+
+function workoutEngineResultToLoggerRecommendation(session: WorkoutSession, engine: WorkoutEngineResult): PostWorkoutRecommendation {
+  const action = workoutEngineDecisionToLegacyAction(engine.overallDecision);
+  return {
+    sessionId: session.id,
+    workoutId: session.workoutId,
+    action,
+    message: engine.overallDecision === "Progress" ? "Increase load next time if form stays clean: 5-10 lb for barbell work or 2.5-5 lb for dumbbells." : engine.overallDecision === "Reduce" ? "Repeat the same weight next time until all reps are completed with RPE <= 8 and no pain." : engine.workoutRecommendation.nextWorkoutGuidance,
+    reason: `Workout Engine V2: ${engine.workoutRecommendation.reason}`,
+    createdAt: session.endedAt ?? new Date().toISOString(),
+  };
+}
+
 export function evaluateWorkoutLoggerResult(session: WorkoutSession, recovery: RecoveryContext): WorkoutLoggerResult {
   const setLogs = session.setLogs;
   const uniqueExercises = new Set(setLogs.map((set) => set.exerciseId));
@@ -88,39 +113,18 @@ export function evaluateWorkoutLoggerResult(session: WorkoutSession, recovery: R
   const prescribedReps = setLogs.reduce((sum, set) => sum + Number(set.targetReps || 0), 0);
   const completionPercentage = prescribedReps > 0 ? Math.min(100, round0((totalReps / prescribedReps) * 100)) : session.status === "completed" ? 100 : 0;
 
-  let action: WorkoutProgressionAction = "progress";
-  let message = "Increase load next time if form stays clean: 5-10 lb for barbell work or 2.5-5 lb for dumbbells.";
-  let reason = "All logged sets were completed with RPE <= 8 and no pain flags.";
-
-  if (painFlags.length || highRpeFlags.length || missedRepFlags.length || session.status !== "completed") {
-    action = "repeat";
-    message = "Repeat the same weight next time until all reps are completed with RPE <= 8 and no pain.";
-    reason = "Reps were missed, RPE was high, pain was noted, or the workout was not fully completed.";
-  }
+  const engine = evaluateWorkout(buildWorkoutEngineInputForWorkoutLogger(session, recovery));
+  const recommendation = workoutEngineResultToLoggerRecommendation(session, engine);
 
   let volumeWarning: WorkoutLoggerResult["volumeWarning"] = null;
-  if (recovery.sorenessLevel >= 8 || recovery.sleepHours < 6) {
-    const reductionPercent = recovery.sorenessLevel >= 9 || recovery.sleepHours < 5 || (recovery.sorenessLevel >= 8 && recovery.sleepHours < 6) ? 30 : 20;
+  if (engine.deload.needed || recovery.sorenessLevel >= 8 || recovery.sleepHours < 6) {
+    const reductionPercent = engine.deload.needed ? engine.deload.reductionPercent : recovery.sorenessLevel >= 9 || recovery.sleepHours < 5 || (recovery.sorenessLevel >= 8 && recovery.sleepHours < 6) ? 30 : 20;
     volumeWarning = {
       reductionPercent,
-      message: `Reduce lifting volume by ${reductionPercent}% before the next workout.`,
-      reason: "High soreness or sleep under 6 hours increases recovery risk.",
+      message: engine.deload.needed ? `Reduce lifting volume by ${reductionPercent}% for a Workout Engine V2 deload.` : `Reduce lifting volume by ${reductionPercent}% before the next workout.`,
+      reason: engine.deload.needed ? `Workout Engine V2: ${engine.deload.reason}` : "High soreness or sleep under 6 hours increases recovery risk.",
     };
-    if (action === "progress") {
-      action = "reduce-volume";
-      message = volumeWarning.message;
-      reason = volumeWarning.reason;
-    }
   }
-
-  const recommendation: PostWorkoutRecommendation = {
-    sessionId: session.id,
-    workoutId: session.workoutId,
-    action,
-    message,
-    reason,
-    createdAt: session.endedAt ?? new Date().toISOString(),
-  };
 
   return {
     summary: {
@@ -141,7 +145,7 @@ export function evaluateWorkoutLoggerResult(session: WorkoutSession, recovery: R
       painFlags,
       poorFormFlags: missedRepFlags,
       bestSets: [...setLogs].sort((a, b) => (b.weightUsed * b.repsCompleted) - (a.weightUsed * a.repsCompleted)).slice(0, 3),
-      coachSummary: `${session.workoutTitle}: ${setLogs.length} sets, ${totalReps} reps, ${estimatedVolume} lb estimated volume.`,
+      coachSummary: `${session.workoutTitle}: ${setLogs.length} sets, ${totalReps} reps, ${estimatedVolume} lb estimated volume. Workout Engine V2 recommends ${engine.overallDecision}.`,
       nextSessionRecommendations: [recommendation],
     },
     nextProgression: recommendation,

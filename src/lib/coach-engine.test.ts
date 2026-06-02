@@ -15,6 +15,8 @@ import {
   getRecommendedStartingWeight,
   getNextWorkoutStep,
   generateNextSetRecommendation,
+  buildWorkoutEngineInputForNextSet,
+  workoutEngineResultToCoachDecision,
   generatePostWorkoutAnalysis,
   generateDailyPrescription,
   calculateNutritionProgress,
@@ -23,6 +25,7 @@ import {
   calculateMealTotals,
   syncNutritionLogFromMeals,
   generateRunningRecommendation,
+  buildRunningEngineInputForRecommendation,
   calculateRunTrends,
   explainCoachDecision,
   createCoachDecisionLogEntry,
@@ -44,6 +47,8 @@ import {
 import { createInitialState } from "./seed-data";
 import { migrateAppState } from "./storage";
 import type { DailyCheckIn, ExerciseLog, NutritionLog, BodyMetric, Workout, WorkoutSession, SetLog, Meal, RunLog, FoodScanResult } from "./types";
+import { evaluateRunning } from "./running-engine";
+import { evaluateWorkout } from "./workout-engine";
 
 const checkIn = (overrides: Partial<DailyCheckIn> = {}): DailyCheckIn => {
   const entry: DailyCheckIn = {
@@ -652,14 +657,16 @@ const runLog = (overrides: Partial<RunLog> = {}): RunLog => ({
   ...overrides,
 });
 
-test("progresses running after an easy completed Zone 2 run with stable readiness and reasonable mileage", () => {
-  const logs = [runLog({ id: "r1", date: "2026-05-17", plannedDistance: 4, actualDistance: 4, averagePace: 11.2, averageHr: 140 }), runLog({ id: "r2", date: "2026-05-24", plannedDistance: 4, actualDistance: 4, averagePace: 11, averageHr: 138 })];
-  const recommendation = generateRunningRecommendation({ runLogs: logs, nextDayReadiness: "Green", plannedDistance: 4, runType: "Zone 2", currentWeeklyMileage: 12, previousWeeklyMileage: 11 });
+test("progresses running through the Running Engine V2 adapter when clean weekly signals support it", () => {
+  const logs = [runLog({ id: "r1", date: "2026-05-17", plannedDistance: 4, actualDistance: 4, averagePace: 11.2, averageHr: 140 }), runLog({ id: "r2", date: "2026-05-20", plannedDistance: 4, actualDistance: 4, averagePace: 11, averageHr: 138 }), runLog({ id: "r3", date: "2026-05-24", runType: "long run", plannedDistance: 6, actualDistance: 6, durationMinutes: 66, averagePace: 11, averageHr: 142, rpe: 6 })];
+  const input = { runLogs: logs, nextDayReadiness: "Green" as const, plannedDistance: 4, runType: "Zone 2", currentWeeklyMileage: 14, previousWeeklyMileage: 13 };
+  const recommendation = generateRunningRecommendation(input);
+  const engine = evaluateRunning(buildRunningEngineInputForRecommendation(input));
 
+  assert.equal(recommendation.action, engine.progression.action);
   assert.equal(recommendation.action, "Progress");
-  assert.equal(recommendation.recommendedDistance, 4.5);
   assert.match(recommendation.message, /increase/i);
-  assert.ok(recommendation.reasons.some((reason) => reason.includes("completed")));
+  assert.ok(recommendation.reasons.some((reason) => /Running Engine V2|Long run|Readiness/i.test(reason)));
 });
 
 test("holds running progression when RPE is high, HR/pace worsens, or readiness is yellow", () => {
@@ -675,11 +682,23 @@ test("regresses running after pain, two poor runs, red readiness, or failed long
   const logs = [runLog({ id: "r1", date: "2026-05-17", plannedDistance: 6, actualDistance: 4, completed: false, rpe: 8 }), runLog({ id: "r2", date: "2026-05-24", plannedDistance: 7, actualDistance: 5, completed: false, pain: true, painLocation: "left knee", rpe: 8 })];
   const recommendation = generateRunningRecommendation({ runLogs: logs, nextDayReadiness: "Red", plannedDistance: 7, runType: "Long run", currentWeeklyMileage: 10, previousWeeklyMileage: 14 });
 
-  assert.equal(recommendation.action, "Regress");
+  assert.equal(recommendation.action, "Recovery Focus");
   assert.equal(recommendation.recommendedDistance, 0);
   assert.ok(recommendation.warnings.some((warning) => warning.includes("left knee")));
   assert.match(recommendation.message, /No run today|walking/i);
 });
+
+test("coach running recommendation exposes Recovery Focus from Running Engine V2 through the legacy shape", () => {
+  const input = { runLogs: [runLog({ id: "r1", date: "2026-05-24", pain: true, painScore: 8, painLocation: "left knee", rpe: 8 })], nextDayReadiness: "Red" as const, plannedDistance: 4, runType: "Zone 2", currentWeeklyMileage: 4, previousWeeklyMileage: 8 };
+  const recommendation = generateRunningRecommendation(input);
+  const engine = evaluateRunning(buildRunningEngineInputForRecommendation(input));
+
+  assert.equal(engine.progression.action, "Recovery Focus");
+  assert.equal(recommendation.action, "Recovery Focus");
+  assert.equal(recommendation.recommendedDistance, 0);
+  assert.match(recommendation.message, /recovery/i);
+});
+
 
 test("calculates run trends for distance, pace, RPE, and long-run progression", () => {
   const trends = calculateRunTrends([
@@ -995,7 +1014,7 @@ test("hardening: red readiness or pain blocks running distance for today", () =>
     { id: "r1", userId: "demo-user", date: "2026-05-20", plannedDistance: 3, actualDistance: 3, durationMinutes: 33, averagePace: 11, averageHr: 135, maxHr: 150, rpe: 5, zone2Compliance: 90, completed: true, pain: false, painLocation: "", notes: "" },
   ];
   const rec = generateRunningRecommendation({ runLogs: logs, nextDayReadiness: "Red", plannedDistance: 4, runType: "Zone 2", currentWeeklyMileage: 6, previousWeeklyMileage: 6 });
-  assert.equal(rec.action, "Regress");
+  assert.equal(rec.action, "Recovery Focus");
   assert.equal(rec.recommendedDistance, 0);
   assert.match(rec.message, /No run today|walk/i);
 });
@@ -1066,4 +1085,43 @@ test("hardening: workout completion percentage is capped at 100", () => {
   const session: WorkoutSession = { id: "s-over", userId: "demo-user", workoutId: workout.id, workoutTitle: workout.title, mode: "coach", startedAt: "2026-05-24T00:00:00.000Z", endedAt: "2026-05-24T01:00:00.000Z", status: "completed", currentExerciseIndex: 0, currentSetNumber: 1, setLogs: [{ id: "set-over", sessionId: "s-over", userId: "demo-user", workoutId: workout.id, exerciseId: "ex-over", exerciseName: "Press", setNumber: 1, targetReps: "5", targetRpe: 8, weightUsed: 100, repsCompleted: 10, rpe: 7, pain: false, formQuality: "solid", completedAt: "2026-05-24T00:30:00.000Z" }] };
   const summary = generatePostWorkoutAnalysis({ session, workout });
   assert.equal(summary.completionPercentage, 100);
+});
+
+
+test("coach next-set recommendation consumes Workout Engine V2 and preserves CoachDecision shape", () => {
+  const setLog: SetLog = { id: "adapter-set", sessionId: "adapter-session", userId: "demo-user", workoutId: "w-test", exerciseId: "bench", exerciseName: "Bench Press", setNumber: 1, targetReps: "5", targetRpe: 8, weightUsed: 185, repsCompleted: 5, rpe: 7, pain: false, formQuality: "solid", completedAt: "2026-06-01T12:00:00.000Z" };
+  const engineInput = buildWorkoutEngineInputForNextSet({ setLog, readinessStatus: "Green" });
+  const engine = evaluateWorkout(engineInput);
+  const decision = generateNextSetRecommendation({ setLog, readinessStatus: "Green" });
+
+  assert.equal(engine.overallDecision, "Progress");
+  assert.deepEqual(decision, workoutEngineResultToCoachDecision(engine, setLog, "Green"));
+  assert.equal(decision.action, "increase");
+  assert.equal(decision.nextWeight, 190);
+  assert.match(decision.reason, /Workout Engine V2/i);
+});
+
+test("coach post-workout analysis consumes Workout Engine V2 recommendations while preserving WorkoutSummary", () => {
+  const workout: Workout = {
+    id: "w-adapter-post",
+    week: 1,
+    phase: "Phase 1",
+    day: "Monday",
+    dayIndex: 1,
+    title: "Upper Strength",
+    type: "upper-strength",
+    notes: "",
+    exercises: [{ id: "bench", workoutId: "w-adapter-post", order: 1, name: "Bench Press", prescribedSets: 2, prescribedReps: "5", prescribedRpe: 8, category: "compound-upper" }],
+  };
+  const logs: SetLog[] = [
+    { id: "post-1", sessionId: "adapter-session", userId: "demo-user", workoutId: workout.id, exerciseId: "bench", exerciseName: "Bench Press", setNumber: 1, targetReps: "5", targetRpe: 8, weightUsed: 185, repsCompleted: 5, rpe: 7, pain: false, formQuality: "solid", completedAt: "2026-06-01T12:00:00.000Z" },
+    { id: "post-2", sessionId: "adapter-session", userId: "demo-user", workoutId: workout.id, exerciseId: "bench", exerciseName: "Bench Press", setNumber: 2, targetReps: "5", targetRpe: 8, weightUsed: 185, repsCompleted: 5, rpe: 8, pain: false, formQuality: "solid", completedAt: "2026-06-01T12:05:00.000Z" },
+  ];
+  const session: WorkoutSession = { id: "adapter-session", userId: "demo-user", workoutId: workout.id, workoutTitle: workout.title, mode: "coach", startedAt: "2026-06-01T12:00:00.000Z", endedAt: "2026-06-01T13:00:00.000Z", status: "completed", currentExerciseIndex: 0, currentSetNumber: 2, setLogs: logs };
+  const analysis = generatePostWorkoutAnalysis({ session, workout, completedAt: "2026-06-01T13:00:00.000Z" });
+
+  assert.equal(analysis.totalSets, 2);
+  assert.equal(analysis.nextSessionRecommendations[0].action, "progress");
+  assert.match(analysis.nextSessionRecommendations[0].reason, /Workout Engine V2/i);
+  assert.match(analysis.coachSummary, /Workout Engine V2/i);
 });

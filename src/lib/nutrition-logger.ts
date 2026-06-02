@@ -1,4 +1,5 @@
 import type { AppState, NutritionLog } from "./types";
+import { calculateMacroProgress, getNutritionTargetForDate, legacyMacroTargetToNutritionTarget } from "./nutrition-engine";
 
 export type NutritionLoggerDayType = "training" | "rest";
 
@@ -41,7 +42,11 @@ const adherencePercent = (actual: number, target: number) => {
 };
 
 export function getNutritionLoggerTarget(dayType: NutritionLoggerDayType): NutritionLoggerTarget {
-  return nutritionLoggerTargets[dayType];
+  const legacyTarget = nutritionLoggerTargets[dayType];
+  const target = getNutritionTargetForDate("legacy-nutrition-logger", {
+    baseTarget: legacyMacroTargetToNutritionTarget({ ...legacyTarget, fiber: 0, water: 0 }, "legacy-nutrition-logger", dayType),
+  });
+  return { calories: target.calories, protein: target.protein, carbs: target.carbs, fat: target.fat };
 }
 
 export function buildNutritionLogRecord(input: NutritionLoggerInput): NutritionLog {
@@ -63,10 +68,12 @@ export function buildNutritionLogRecord(input: NutritionLoggerInput): NutritionL
 
 export function evaluateNutritionLoggerAdherence(log: NutritionLog, dayType: NutritionLoggerDayType): NutritionLoggerAdherence {
   const target = getNutritionLoggerTarget(dayType);
+  const nutritionTarget = legacyMacroTargetToNutritionTarget({ ...target, fiber: log.fiber, water: log.water }, log.date, dayType);
+  const progress = calculateMacroProgress(log, nutritionTarget);
   return {
     target,
-    calorieAdherencePercent: adherencePercent(log.calories, target.calories),
-    proteinAdherencePercent: adherencePercent(log.protein, target.protein),
+    calorieAdherencePercent: progress.calories.target > 0 ? adherencePercent(log.calories, progress.calories.target) : 0,
+    proteinAdherencePercent: progress.protein.target > 0 ? adherencePercent(log.protein, progress.protein.target) : 0,
   };
 }
 

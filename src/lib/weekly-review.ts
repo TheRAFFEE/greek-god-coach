@@ -1,4 +1,6 @@
 import type { AppState, BodyMetric, DailyCheckIn, NutritionLog, RunLog, WorkoutSession } from "./types";
+import { evaluateReadiness, readinessInputFromWeeklyWindow, type ReadinessEngineResult } from "./readiness-engine";
+import { evaluateRunning, type RunningEngineInput, type RunningEngineResult, type RunningProgressionAction } from "./running-engine";
 
 export type NextWeekRecommendation = "Progress" | "Repeat" | "Deload" | "Recovery focus";
 
@@ -23,6 +25,13 @@ export interface WeeklyReviewSummary {
   adherenceScore: number;
   nextWeekRecommendation: NextWeekRecommendation;
   recommendationReason: string;
+  runningProgressionAction: RunningProgressionAction;
+  runningReadiness: RunningEngineResult["runningReadiness"];
+  runningRaceReadinessScore: number;
+  runningInjuryRiskScore: number;
+  runningConfidenceScore: number;
+  runningDataQualityScore: number;
+  runningExplanation: string;
 }
 
 const round = (value: number, digits = 1) => Number(value.toFixed(digits));
@@ -62,39 +71,94 @@ function buildAdherenceScore(input: {
   return Math.max(0, Math.round((nutritionScore + sleepScore + liftScore + runScore) / 4 - painPenalty));
 }
 
+export function buildRunningEngineInputForWeeklyReview(input: {
+  window: WeeklyReviewWindow;
+  runLogs: RunLog[];
+  checkIns: DailyCheckIn[];
+  weeklyReadiness: ReadinessEngineResult;
+  totalWeeklyMiles: number;
+}): RunningEngineInput {
+  const sortedRuns = [...input.runLogs].sort((a, b) => a.date.localeCompare(b.date));
+  const completedRuns = sortedRuns.filter((run) => run.completed && run.actualDistance > 0);
+  const averageSleep = average(input.checkIns.map((entry) => entry.sleepHours)) ?? undefined;
+  const averageSoreness = average(input.checkIns.map((entry) => entry.soreness)) ?? undefined;
+  const averageStress = average(input.checkIns.map((entry) => entry.stress)) ?? undefined;
+  const averageEnergy = average(input.checkIns.map((entry) => entry.energy)) ?? undefined;
+  return {
+    generatedAt: `${input.window.endDate}T12:00:00.000Z`,
+    evaluationDate: input.window.endDate,
+    race: { raceDate: "2027-01-17", targetFinishMinutes: 118, targetPaceSecondsPerMile: 540, distanceMiles: 13.1 },
+    runLogs: sortedRuns.map((run) => ({
+      id: run.id,
+      date: run.date,
+      runType: run.runType,
+      plannedDistance: run.plannedDistance,
+      actualDistance: run.actualDistance,
+      durationMinutes: run.durationMinutes,
+      averagePace: run.averagePace,
+      averagePaceSecondsPerMile: Math.round(run.averagePace * 60),
+      averageHr: run.averageHr,
+      maxHr: run.maxHr,
+      rpe: run.rpe,
+      zone2Compliance: run.zone2Compliance,
+      completed: run.completed,
+      walkBreaks: run.walkBreaks,
+      pain: run.pain,
+      painScore: run.painScore,
+      painLocation: run.painLocation,
+      notes: run.notes,
+    })),
+    currentWeek: {
+      startDate: input.window.startDate,
+      endDate: input.window.endDate,
+      weeklyMileage: input.totalWeeklyMiles,
+      rolling7DayMileage: input.totalWeeklyMiles,
+      runningDaysPlanned: Math.max(sortedRuns.length, 1),
+      runningDaysCompleted: completedRuns.length,
+    },
+    readiness: {
+      status: input.weeklyReadiness.status,
+      score: input.weeklyReadiness.score,
+      confidence: input.weeklyReadiness.confidence,
+      averageSleep,
+      averageSoreness,
+      averageStress,
+      averageEnergy,
+    },
+  };
+}
+
 function chooseRecommendation(input: {
-  averageSleep: number | null;
-  averageSoreness: number | null;
-  painFlags: string[];
-  longRunCompleted: boolean;
-  longRun?: RunLog;
+  running: RunningEngineResult;
+  weeklyReadiness: ReadinessEngineResult;
   liftsCompleted: number;
   adherenceScore: number;
   alcoholDays: number;
 }): { nextWeekRecommendation: NextWeekRecommendation; recommendationReason: string } {
-  const highPain = input.painFlags.some((flag) => /(?:7|8|9|10)\/10/.test(flag));
-  if (highPain) {
-    return { nextWeekRecommendation: "Recovery focus", recommendationReason: "High pain was logged, so injury risk takes priority over progression. Reduce running intensity and lower-body lifting until symptoms improve." };
+  const runningAction = input.running.progression.action;
+  if (runningAction === "Recovery Focus") {
+    return { nextWeekRecommendation: "Recovery focus", recommendationReason: `${input.running.progression.reason} Running Engine V2 injury risk ${input.running.readiness.injuryRiskScore}/100 takes priority over progression.` };
   }
-
-  const poorRecovery = (input.averageSleep !== null && input.averageSleep < 6) || (input.averageSoreness !== null && input.averageSoreness >= 7.5);
-  if (poorRecovery) {
-    return { nextWeekRecommendation: "Deload", recommendationReason: "Weekly recovery is poor based on sleep or soreness, so hold or reduce training load and avoid aggressive calorie cuts." };
+  if (runningAction === "Regress") {
+    return { nextWeekRecommendation: "Deload", recommendationReason: `${input.running.progression.reason} Running Engine V2 recommends reducing run load before progressing.` };
   }
-
-  if (!input.longRunCompleted) {
-    return { nextWeekRecommendation: "Repeat", recommendationReason: "Long run was missed, so repeat the current week instead of progressing." };
+  if (input.weeklyReadiness.status === "Red") {
+    return { nextWeekRecommendation: "Deload", recommendationReason: `Weekly readiness is Red because ${input.weeklyReadiness.reason}, so hold or reduce training load and avoid aggressive calorie cuts.` };
   }
-
-  if (input.longRun && input.longRun.rpe <= 7 && !input.longRun.pain && (input.longRun.painScore ?? 0) < 4 && input.liftsCompleted >= 3 && input.adherenceScore >= 80) {
-    return { nextWeekRecommendation: "Progress", recommendationReason: "Long run was completed with RPE <= 7, pain stayed low, lifting consistency was solid, and adherence supports conservative progression." };
+  if (runningAction === "Hold") {
+    const longRunMissed = input.running.longRunStatus.status === "unknown" || input.running.longRunStatus.status === "watch";
+    const recoveryWarning = input.weeklyReadiness.status === "Yellow" && input.weeklyReadiness.reasons.some((reason) => reason.severity === "red" || reason.factor === "sleep" || reason.factor === "soreness" || reason.factor === "energy" || reason.factor === "pain");
+    const legacyReason = longRunMissed
+      ? "Long run was missed, so repeat the current week instead of progressing."
+      : recoveryWarning
+        ? "Weekly readiness is Yellow with a major recovery warning, so repeat instead of progressing."
+        : `${input.running.progression.reason} Repeat the week until Running Engine V2 supports progression.`;
+    return { nextWeekRecommendation: "Repeat", recommendationReason: legacyReason };
   }
-
-  if (input.alcoholDays >= 2 || input.adherenceScore < 70) {
-    return { nextWeekRecommendation: "Repeat", recommendationReason: "Adherence, alcohol, or recovery signals were not strong enough to progress. Repeat the week and improve consistency." };
+  if (input.liftsCompleted >= 3 && input.adherenceScore >= 80 && input.alcoholDays < 2) {
+    return { nextWeekRecommendation: "Progress", recommendationReason: `Long run was completed. ${input.running.progression.reason} Lifting consistency and adherence also support conservative progression.` };
   }
-
-  return { nextWeekRecommendation: "Repeat", recommendationReason: "Most work was completed, but the safest coach decision is to repeat until recovery and performance clearly support progression." };
+  return { nextWeekRecommendation: "Repeat", recommendationReason: "Running Engine V2 supports progression, but lifting, nutrition, alcohol, or recovery consistency is not strong enough. Repeat before progressing." };
 }
 
 export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWindow): WeeklyReviewSummary {
@@ -113,7 +177,6 @@ export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWi
   const averageCalories = average(nutritionLogs.map((entry) => entry.calories));
   const averageProtein = average(nutritionLogs.map((entry) => entry.protein));
   const averageSleep = average(checkIns.map((entry) => entry.sleepHours));
-  const averageSoreness = average(checkIns.map((entry) => entry.soreness));
   const alcoholDays = Math.max(
     checkIns.filter((entry) => entry.alcohol).length,
     nutritionLogs.filter((entry) => entry.alcohol > 0).length,
@@ -121,7 +184,10 @@ export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWi
   const painFlags = summarizePainFlags(checkIns, runLogs);
   const totalWeeklyMiles = round(runLogs.reduce((sum, entry) => sum + (entry.completed ? entry.actualDistance : 0), 0));
   const adherenceScore = buildAdherenceScore({ nutritionLogs, checkIns, runLogs, workoutSessions, longRunCompleted });
-  const recommendation = chooseRecommendation({ averageSleep, averageSoreness, painFlags, longRunCompleted, longRun, liftsCompleted, adherenceScore, alcoholDays });
+  const runPainSeverity = runLogs.reduce((max, entry) => Math.max(max, entry.pain || (entry.painScore ?? 0) > 0 ? (entry.painScore ?? 0) : 0), 0) || null;
+  const weeklyReadiness = evaluateReadiness(readinessInputFromWeeklyWindow({ checkIns, runPainSeverity }));
+  const running = evaluateRunning(buildRunningEngineInputForWeeklyReview({ window, runLogs, checkIns, weeklyReadiness, totalWeeklyMiles }));
+  const recommendation = chooseRecommendation({ running, weeklyReadiness, liftsCompleted, adherenceScore, alcoholDays });
 
   return {
     startDate: window.startDate,
@@ -138,5 +204,12 @@ export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWi
     painFlags,
     adherenceScore,
     ...recommendation,
+    runningProgressionAction: running.progression.action,
+    runningReadiness: running.runningReadiness,
+    runningRaceReadinessScore: running.readiness.raceReadinessScore,
+    runningInjuryRiskScore: running.readiness.injuryRiskScore,
+    runningConfidenceScore: running.confidenceScore,
+    runningDataQualityScore: running.dataQualityScore,
+    runningExplanation: running.explanations.map((explanation) => explanation.summary).join(" "),
   };
 }

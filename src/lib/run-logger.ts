@@ -1,4 +1,5 @@
 import type { AppState, RunLog, RunType } from "./types";
+import { evaluateRunning, type RunningEngineInput, type RunningProgressionAction } from "./running-engine";
 
 export type NextRunDecision = "progress" | "repeat" | "deload";
 
@@ -67,33 +68,81 @@ export function buildRunLoggerRecord(input: RunLoggerInput): RunLog {
   };
 }
 
+export function buildRunningEngineInputForRunLogger(run: RunLog): RunningEngineInput {
+  const painScore = run.painScore ?? (run.pain ? 7 : 0);
+  const engineRun = {
+    id: run.id,
+    date: run.date,
+    runType: run.runType,
+    plannedDistance: run.plannedDistance,
+    actualDistance: run.actualDistance,
+    durationMinutes: run.durationMinutes,
+    averagePace: run.averagePace,
+    averagePaceSecondsPerMile: Math.round(run.averagePace * 60),
+    averageHr: run.averageHr,
+    maxHr: run.maxHr,
+    rpe: run.rpe,
+    zone2Compliance: run.zone2Compliance,
+    completed: run.completed,
+    walkBreaks: run.walkBreaks,
+    pain: run.pain,
+    painScore,
+    painLocation: run.painLocation,
+    notes: run.notes,
+  };
+  const baselineRun = {
+    ...engineRun,
+    id: `${run.id}-compat-baseline`,
+    date: "2026-01-01",
+    rpe: Math.min(run.rpe, 6),
+    pain: false,
+    painScore: 0,
+    walkBreaks: false,
+  };
+  const cleanEnoughForLegacyProgress = run.completed && run.rpe <= 7 && painScore < 4 && !run.walkBreaks;
+  const runLogs = cleanEnoughForLegacyProgress ? [baselineRun, engineRun] : [engineRun];
+  return {
+    generatedAt: `${run.date}T12:00:00.000Z`,
+    evaluationDate: run.date,
+    race: { raceDate: "2027-01-17", targetFinishMinutes: 118, targetPaceSecondsPerMile: 540, distanceMiles: 13.1 },
+    runLogs,
+    currentWeek: {
+      startDate: run.date,
+      endDate: run.date,
+      weeklyMileage: run.completed ? run.actualDistance : 0,
+      rolling7DayMileage: run.completed ? run.actualDistance : 0,
+      previousWeeklyMileage: cleanEnoughForLegacyProgress ? (run.completed ? run.actualDistance : 0) : undefined,
+      runningDaysPlanned: cleanEnoughForLegacyProgress ? 2 : 1,
+      runningDaysCompleted: cleanEnoughForLegacyProgress ? 2 : run.completed ? 1 : 0,
+    },
+    readiness: {
+      status: painScore >= 7 ? "Red" : painScore >= 4 || run.rpe >= 8 || run.walkBreaks ? "Yellow" : "Green",
+      score: painScore >= 7 ? 35 : painScore >= 4 || run.rpe >= 8 || run.walkBreaks ? 62 : 82,
+      confidence: "Medium",
+    },
+  };
+}
+
+function legacyDecisionFromRunningAction(action: RunningProgressionAction): NextRunDecision {
+  if (action === "Progress") return "progress";
+  if (action === "Hold") return "repeat";
+  return "deload";
+}
+
 export function evaluateRunLoggerResult(run: RunLog): RunLoggerResult {
   const runType = run.runType ?? "easy";
   const painScore = run.painScore ?? (run.pain ? 7 : 0);
   const walkBreaks = run.walkBreaks ?? false;
-  const reasons: string[] = [];
-  let nextRunDecision: NextRunDecision = "progress";
-
-  if (painScore >= 7) {
-    nextRunDecision = "deload";
-    reasons.push("Pain score is high, so injury prevention overrides progression.");
-  } else if (!run.completed || run.rpe >= 8 || walkBreaks || painScore >= 4) {
-    nextRunDecision = "repeat";
-    if (!run.completed) reasons.push("Run was not completed.");
-    if (run.rpe >= 8) reasons.push("RPE was high.");
-    if (walkBreaks) reasons.push("Walk breaks were used; hold progression until continuous running improves.");
-    if (painScore >= 4) reasons.push("Pain was moderate.");
-  } else {
-    if (runType === "long run") reasons.push("Long run was completed with RPE <= 7 and no high pain.");
-    else reasons.push("Run was completed with controlled effort and no limiting pain.");
-  }
-
+  const engine = evaluateRunning(buildRunningEngineInputForRunLogger(run));
+  const nextRunDecision = legacyDecisionFromRunningAction(engine.progression.action);
   const painWarning = painScore >= 7 ? `Pain score is ${painScore}/10. Deload running and avoid speed work; choose rest, mobility, walking, or easy running only if symptoms settle.` : null;
   const actionCopy = nextRunDecision === "progress"
     ? "Progress the next run conservatively."
     : nextRunDecision === "repeat"
       ? "Repeat the next run instead of progressing."
-      : "Deload the next run and avoid hard running.";
+      : engine.progression.action === "Recovery Focus"
+        ? "Recovery focus: deload the next run and avoid hard running."
+        : "Deload the next run and avoid hard running.";
 
   return {
     runSummary: {
@@ -111,7 +160,15 @@ export function evaluateRunLoggerResult(run: RunLog): RunLoggerResult {
     nextRunDecision,
     recommendation: actionCopy,
     painWarning,
-    reasons,
+    reasons: [
+      `Running Engine V2 action: ${engine.progression.action}.`,
+      engine.progression.reason,
+      ...engine.progression.explanation.primaryDrivers,
+      ...(walkBreaks ? ["Walk breaks were used; hold progression until continuous running improves."] : []),
+      ...(run.rpe >= 8 ? ["RPE was high."] : []),
+      ...(painScore >= 4 ? ["Pain was moderate."] : []),
+      ...(!run.completed ? ["Run was not completed."] : []),
+    ],
   };
 }
 

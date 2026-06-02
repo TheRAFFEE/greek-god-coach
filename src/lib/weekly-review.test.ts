@@ -126,13 +126,13 @@ test("recommends repeat when the long run is missed", () => {
   assert.match(review.recommendationReason, /Long run was missed/i);
 });
 
-test("recommends deload when sleep or soreness indicates poor recovery", () => {
+test("recommends repeat when Yellow weekly readiness has a major recovery warning", () => {
   const state = appState({ checkIns: [1, 2, 3, 4, 5, 6, 7].map((day) => checkIn(day, { sleepHours: 5.4, soreness: 7 })) });
   const review = buildWeeklyReviewSummary(state, { startDate: date(1), endDate: date(7) });
 
   assert.equal(review.averageSleep, 5.4);
-  assert.equal(review.nextWeekRecommendation, "Deload");
-  assert.match(review.recommendationReason, /recovery/i);
+  assert.equal(review.nextWeekRecommendation, "Repeat");
+  assert.match(review.recommendationReason, /major recovery warning/i);
 });
 
 test("recommends recovery focus and reports pain flags when high pain appears", () => {
@@ -145,4 +145,28 @@ test("recommends recovery focus and reports pain flags when high pain appears", 
   assert.equal(review.nextWeekRecommendation, "Recovery focus");
   assert.equal(review.painFlags.length, 2);
   assert.match(review.painFlags.join(" "), /knee/i);
+});
+
+
+test("weekly review consumes Running Engine V2 running signals instead of recalculating progression locally", () => {
+  const state = appState();
+  const review = buildWeeklyReviewSummary(state, { startDate: date(1), endDate: date(7) });
+
+  assert.equal(review.runningProgressionAction, "Progress");
+  assert.ok(review.runningRaceReadinessScore >= 50);
+  assert.ok(review.runningInjuryRiskScore < 50);
+  assert.ok(review.runningConfidenceScore >= 65);
+  assert.match(review.runningExplanation, /Running can progress|Running should/i);
+});
+
+test("weekly review maps Running Engine V2 Recovery Focus to existing Recovery focus recommendation", () => {
+  const state = appState({
+    checkIns: [1, 2, 3, 4, 5, 6, 7].map((day) => checkIn(day, day === 6 ? { pain: true, painSeverity: 8, painLocation: "knee" } : {})),
+    runLogs: [run(6, { runType: "long run", pain: true, painScore: 8, painLocation: "knee", rpe: 8 })],
+  });
+  const review = buildWeeklyReviewSummary(state, { startDate: date(1), endDate: date(7) });
+
+  assert.equal(review.runningProgressionAction, "Recovery Focus");
+  assert.equal(review.nextWeekRecommendation, "Recovery focus");
+  assert.ok(review.runningInjuryRiskScore >= 50);
 });

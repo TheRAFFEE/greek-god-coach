@@ -1,4 +1,5 @@
 import type { AppState, BodyMetric, DailyCheckIn, ReadinessStatus } from "./types";
+import { evaluateReadiness, readinessInputFromDailyCheckIn } from "./readiness-engine";
 
 export interface DailyRecoveryStatus {
   status: ReadinessStatus;
@@ -7,45 +8,25 @@ export interface DailyRecoveryStatus {
   reasons: string[];
 }
 
-function isRedRecovery(checkIn: DailyCheckIn): string[] {
-  const reasons: string[] = [];
-  if (checkIn.sleepHours < 5) reasons.push("sleep is under 5 hours");
-  if (checkIn.soreness >= 8) reasons.push("soreness is 8 or higher");
-  if (checkIn.stress >= 5) reasons.push("stress is 5 or higher");
-  if (checkIn.energy <= 1) reasons.push("energy is 1");
-  if (checkIn.pain && checkIn.painSeverity >= 7) reasons.push("pain severity is 7 or higher");
-  return reasons;
-}
-
-function isYellowRecovery(checkIn: DailyCheckIn): string[] {
-  const reasons: string[] = [];
-  if (checkIn.sleepHours >= 5 && checkIn.sleepHours < 6.5) reasons.push("sleep is between 5 and 6.5 hours");
-  if (checkIn.soreness >= 6 && checkIn.soreness <= 7) reasons.push("soreness is 6-7");
-  if (checkIn.stress === 4) reasons.push("stress is 4");
-  if (checkIn.energy === 2) reasons.push("energy is 2");
-  if (checkIn.pain && checkIn.painSeverity >= 4 && checkIn.painSeverity <= 6) reasons.push("pain severity is 4-6");
-  if (checkIn.alcohol) reasons.push("alcohol was logged");
-  return reasons;
-}
-
 export function evaluateDailyRecoveryStatus(checkIn: DailyCheckIn): DailyRecoveryStatus {
-  const redReasons = isRedRecovery(checkIn);
-  if (redReasons.length) {
+  const readiness = evaluateReadiness(readinessInputFromDailyCheckIn(checkIn));
+  const reasons = readiness.reasons.length ? readiness.reasons.map((reason) => reason.message) : ["Recovery markers support normal training"];
+
+  if (readiness.status === "Red") {
     return {
       status: "Red",
       recommendation: "Prioritize recovery, mobility, and walking only.",
-      reasons: redReasons,
-      reasoning: `${redReasons.join("; ")}. The adjustment rules say Red days take priority when severe recovery risk appears.`,
+      reasons,
+      reasoning: `${reasons.join("; ")}. The unified readiness engine says Red days take priority when severe recovery risk appears.`,
     };
   }
 
-  const yellowReasons = isYellowRecovery(checkIn);
-  if (yellowReasons.length) {
+  if (readiness.status === "Yellow") {
     return {
       status: "Yellow",
       recommendation: "Modify today's training dose.",
-      reasons: yellowReasons,
-      reasoning: `${yellowReasons.join("; ")}. Keep consistency, but reduce volume or intensity.`,
+      reasons,
+      reasoning: `${reasons.join("; ")}. Keep consistency, but reduce volume or intensity.`,
     };
   }
 
@@ -57,18 +38,38 @@ export function evaluateDailyRecoveryStatus(checkIn: DailyCheckIn): DailyRecover
   };
 }
 
+export interface DailyCompletionStatus {
+  workoutCompleted: boolean;
+  runCompleted: boolean;
+}
+
+function isoDate(value?: string) {
+  return value?.slice(0, 10) ?? "";
+}
+
+export function deriveDailyCompletionStatus(state: AppState, date: string): DailyCompletionStatus {
+  const workoutCompleted = (state.workoutSessions ?? []).some((session) =>
+    isoDate(session.startedAt) === date || isoDate(session.endedAt) === date || session.setLogs.some((set) => isoDate(set.completedAt) === date)
+  );
+  const runCompleted = (state.runLogs ?? []).some((run) => run.date === date);
+
+  return { workoutCompleted, runCompleted };
+}
+
 export function upsertDailyCheckIn(state: AppState, checkIn: DailyCheckIn, bodyMetricId: string): AppState {
+  const completion = deriveDailyCompletionStatus(state, checkIn.date);
+  const derivedCheckIn: DailyCheckIn = { ...checkIn, ...completion };
   const bodyMetric: BodyMetric = {
     id: bodyMetricId,
     userId: state.user.id,
-    date: checkIn.date,
-    weight: checkIn.weight,
+    date: derivedCheckIn.date,
+    weight: derivedCheckIn.weight,
     notes: "from daily check-in",
   };
 
   return {
     ...state,
-    checkIns: [...state.checkIns.filter((entry) => entry.date !== checkIn.date), checkIn].sort((a, b) => a.date.localeCompare(b.date)),
-    bodyMetrics: [...state.bodyMetrics.filter((metric) => metric.date !== checkIn.date), bodyMetric].sort((a, b) => a.date.localeCompare(b.date)),
+    checkIns: [...state.checkIns.filter((entry) => entry.date !== derivedCheckIn.date), derivedCheckIn].sort((a, b) => a.date.localeCompare(b.date)),
+    bodyMetrics: [...state.bodyMetrics.filter((metric) => metric.date !== derivedCheckIn.date), bodyMetric].sort((a, b) => a.date.localeCompare(b.date)),
   };
 }

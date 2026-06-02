@@ -142,5 +142,5 @@ test("keeps the MVP dashboard conservative for poor recovery or missing logs", (
   assert.equal(dashboard.weeklyMiles, 0);
   assert.equal(dashboard.caloriesStatus, "No nutrition logged today");
   assert.equal(dashboard.proteinStatus, "No protein logged today");
-  assert.equal(dashboard.currentPlanRecommendation, "Deload");
+  assert.equal(dashboard.currentPlanRecommendation, "Recovery focus");
 });

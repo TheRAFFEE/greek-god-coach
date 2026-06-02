@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { AppState } from "./types";
-import { buildWorkoutLoggerSession, evaluateWorkoutLoggerResult, saveWorkoutLoggerEntry } from "./workout-logger";
+import { evaluateWorkout } from "./workout-engine";
+import { buildWorkoutEngineInputForWorkoutLogger, buildWorkoutLoggerSession, evaluateWorkoutLoggerResult, saveWorkoutLoggerEntry } from "./workout-logger";
 
 const input = {
   id: "manual-workout-1",
@@ -75,4 +76,31 @@ test("saves one workout per date and stores summary plus progression", () => {
   assert.equal(saved.state.workoutSessions[0].id, "new");
   assert.equal(saved.state.workoutSummaries.length, 1);
   assert.equal(saved.state.postWorkoutRecommendations[0].action, "progress");
+});
+
+
+test("workout logger consumes Workout Engine V2 through an adapter while preserving the legacy shape", () => {
+  const session = buildWorkoutLoggerSession(input);
+  const engineInput = buildWorkoutEngineInputForWorkoutLogger(session, { sorenessLevel: 4, sleepHours: 7 });
+  const engine = evaluateWorkout(engineInput);
+  const result = evaluateWorkoutLoggerResult(session, { sorenessLevel: 4, sleepHours: 7 });
+
+  assert.equal(engine.overallDecision, "Progress");
+  assert.equal(result.nextProgression.action, "progress");
+  assert.equal(result.summary.totalSets, 6);
+  assert.match(result.nextProgression.reason, /Workout Engine V2/i);
+});
+
+test("workout logger maps Workout Engine V2 Substitute and Deload to compatible legacy recommendations", () => {
+  const painful = buildWorkoutLoggerSession({
+    ...input,
+    exercises: [{ id: "ex-1", name: "Bench Press", sets: 1, reps: 5, weight: 185, rpe: 8, painNotes: "sharp shoulder pain", completed: true }],
+  });
+  const substitute = evaluateWorkoutLoggerResult(painful, { sorenessLevel: 5, sleepHours: 7 });
+  assert.equal(substitute.nextProgression.action, "substitute");
+
+  const exhausted = buildWorkoutLoggerSession(input);
+  const deload = evaluateWorkoutLoggerResult(exhausted, { sorenessLevel: 9, sleepHours: 4.5 });
+  assert.equal(deload.nextProgression.action, "reduce-volume");
+  assert.match(deload.nextProgression.reason, /Workout Engine V2|Deload/i);
 });

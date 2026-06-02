@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { AppState, RunLog } from "./types";
-import { buildRunLoggerRecord, evaluateRunLoggerResult, saveRunLoggerEntry } from "./run-logger";
+import { buildRunLoggerRecord, buildRunningEngineInputForRunLogger, evaluateRunLoggerResult, saveRunLoggerEntry } from "./run-logger";
+import { evaluateRunning } from "./running-engine";
 
 const run = (overrides: Partial<RunLog> = {}): RunLog => ({
   id: "run-base",
@@ -89,4 +90,26 @@ test("saves one run per date and keeps the latest summary available", () => {
   assert.equal(saved.state.runLogs[0].id, "new");
   assert.equal(saved.result.runSummary.distance, 3.5);
   assert.equal(saved.result.runSummary.runType, "tempo");
+});
+
+
+test("run logger result is a legacy projection of Running Engine V2", () => {
+  const cleanLongRun = run({ runType: "long run", plannedDistance: 6, actualDistance: 6, durationMinutes: 66, averagePace: 11, rpe: 6, painScore: 0 });
+  const result = evaluateRunLoggerResult(cleanLongRun);
+  const engine = evaluateRunning(buildRunningEngineInputForRunLogger(cleanLongRun));
+
+  assert.equal(engine.progression.action, "Progress");
+  assert.equal(result.nextRunDecision, "progress");
+  assert.match(result.reasons.join(" "), /Running Engine V2/i);
+});
+
+test("run logger maps Running Engine V2 Recovery Focus to legacy deload without changing the UI shape", () => {
+  const painfulRun = run({ runType: "speed", rpe: 6, painScore: 8, pain: true });
+  const result = evaluateRunLoggerResult(painfulRun);
+  const engine = evaluateRunning(buildRunningEngineInputForRunLogger(painfulRun));
+
+  assert.equal(engine.progression.action, "Recovery Focus");
+  assert.equal(result.nextRunDecision, "deload");
+  assert.match(result.recommendation, /deload|recovery/i);
+  assert.match(result.painWarning ?? "", /8\/10/);
 });

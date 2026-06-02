@@ -198,7 +198,7 @@ export interface NextMealMacroSuggestion {
   message: string;
 }
 
-export type RunningRecommendationAction = "Progress" | "Hold" | "Regress";
+export type RunningRecommendationAction = "Progress" | "Hold" | "Regress" | "Recovery Focus";
 export type RunType = "easy" | "speed" | "tempo" | "long run" | "race";
 
 export interface RunLog {
