@@ -17,9 +17,11 @@ test("removes legacy modes and collection-style labels from primary navigation",
 
 test("assigns every existing capability to the only screen where it belongs", () => {
   assert.deepEqual(screenGroups.Home, ["Readiness", "Today's plan", "Calories", "Weight", "Start Day"]);
-  assert.deepEqual(screenGroups.Train, ["Today's workout", "Today's run", "Start Training"]);
-  assert.deepEqual(screenGroups.Log, ["Daily check-in", "Workout logging", "Run logging", "Nutrition logging", "Body metrics logging"]);
-  assert.deepEqual(screenGroups.Progress, ["Weight trends", "Pace trends", "Mileage trends", "Weekly review", "Progress photos", "Race countdown", "Adherence metrics"]);
+  assert.deepEqual(screenGroups.Train, ["Warm-up", "Today's workout", "Today's run", "Cooldown", "Session summary", "Start Training"]);
+  assert.deepEqual(screenGroups.Log, ["Daily check-in", "Nutrition logging", "Body metrics logging", "Progress photos"]);
+  assert.equal(screenGroups.Log.includes("Workout logging"), false);
+  assert.equal(screenGroups.Log.includes("Run logging"), false);
+  assert.deepEqual(screenGroups.Progress, ["Weight trends", "Pace trends", "Mileage trends", "Weekly review", "Race countdown", "Adherence metrics"]);
   assert.deepEqual(screenGroups.More, ["Settings", "Integrations", "Goals"]);
 });
 

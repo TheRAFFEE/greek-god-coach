@@ -1,7 +1,10 @@
-import type { AppMode, AppState, MacroTarget, Meal, MealCategory, MealItem } from "./types";
+import type { AppMode, AppState, MacroTarget, Meal, MealCategory, MealItem, RaceCalendarSettings } from "./types";
 import { createInitialState } from "./seed-data";
+import { createBackupPayload, LAST_BACKUP_DATE_KEY, PRE_RESTORE_BACKUP_KEY, SNAPSHOT_KEYS, STORAGE_KEY, type BackupPayload } from "./backup-restore";
 
-const key = "greek-god-coach:v1";
+const key = STORAGE_KEY;
+
+export { LAST_BACKUP_DATE_KEY, PRE_RESTORE_BACKUP_KEY, SNAPSHOT_KEYS, STORAGE_KEY };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 const asArray = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
@@ -10,6 +13,21 @@ const asString = (value: unknown, fallback = "") => typeof value === "string" ? 
 const isAppMode = (value: unknown): value is AppMode => value === "coach" || value === "tracker" || value === "manual";
 const mealCategories: MealCategory[] = ["Breakfast", "Lunch", "Dinner", "Snack", "Pre-workout", "Post-workout", "Custom"];
 const isMealCategory = (value: unknown): value is MealCategory => typeof value === "string" && mealCategories.includes(value as MealCategory);
+const raceTypes: NonNullable<RaceCalendarSettings["raceType"]>[] = ["HalfMarathon", "Marathon", "10K", "5K", "Other"];
+const isRaceType = (value: unknown): value is NonNullable<RaceCalendarSettings["raceType"]> => typeof value === "string" && raceTypes.includes(value as NonNullable<RaceCalendarSettings["raceType"]>);
+const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+const asOptionalPositiveNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+
+function normalizeRaceCalendarSettings(value: unknown): RaceCalendarSettings | undefined {
+  if (!isRecord(value)) return undefined;
+  const settings: RaceCalendarSettings = {};
+  if (typeof value.raceDate === "string" && isoDatePattern.test(value.raceDate) && !Number.isNaN(Date.parse(`${value.raceDate}T00:00:00.000Z`))) settings.raceDate = value.raceDate;
+  if (isRaceType(value.raceType)) settings.raceType = value.raceType;
+  settings.targetRacePace = asOptionalPositiveNumber(value.targetRacePace);
+  settings.currentLongestRun = asOptionalPositiveNumber(value.currentLongestRun);
+  settings.currentWeeklyMileage = asOptionalPositiveNumber(value.currentWeeklyMileage);
+  return Object.keys(settings).length ? settings : undefined;
+}
 
 function normalizeMacroTargets(value: unknown, defaults: MacroTarget[]): MacroTarget[] {
   const rawTargets = asArray<Partial<MacroTarget>>(value).filter(isRecord);
@@ -96,23 +114,79 @@ export function migrateAppState(raw: unknown): AppState {
     postWorkoutRecommendations: asArray(raw.postWorkoutRecommendations),
     adjustments: asArray(raw.adjustments),
     macroTargets: normalizeMacroTargets(raw.macroTargets, defaults.macroTargets),
+    raceCalendarSettings: normalizeRaceCalendarSettings(raw.raceCalendarSettings),
   };
   return state;
 }
 
-export function loadState(): AppState {
-  if (typeof window === "undefined") return createInitialState();
-  const raw = window.localStorage.getItem(key);
-  if (!raw) return createInitialState();
+export type StateLoadResult =
+  | { status: "ready"; state: AppState; recoveryOptions: { hasSnapshot: boolean; hasPreRestoreBackup: boolean } }
+  | { status: "empty"; state: AppState; recoveryOptions: { hasSnapshot: boolean; hasPreRestoreBackup: boolean } }
+  | { status: "corrupt"; state: null; recoveryOptions: { hasSnapshot: boolean; hasPreRestoreBackup: boolean }; message: string };
+
+function hasStoredRecoveryBackup(storage: Storage, recoveryKey: string) {
+  return Boolean(storage.getItem(recoveryKey));
+}
+
+function recoveryOptions(storage: Storage) {
+  return {
+    hasSnapshot: hasStoredRecoveryBackup(storage, SNAPSHOT_KEYS.current),
+    hasPreRestoreBackup: hasStoredRecoveryBackup(storage, PRE_RESTORE_BACKUP_KEY),
+  };
+}
+
+function readBackupPayload(storage: Storage, backupKey: string): BackupPayload | null {
+  const raw = storage.getItem(backupKey);
+  if (!raw) return null;
   try {
-    return migrateAppState(JSON.parse(raw));
+    const parsed = JSON.parse(raw) as BackupPayload;
+    if (!parsed || typeof parsed !== "object" || !parsed.appState) return null;
+    return parsed;
   } catch {
-    return createInitialState();
+    return null;
   }
 }
 
+export function loadStateWithRecovery(): StateLoadResult {
+  if (typeof window === "undefined") return { status: "empty", state: createInitialState(), recoveryOptions: { hasSnapshot: false, hasPreRestoreBackup: false } };
+  const storage = window.localStorage;
+  const raw = storage.getItem(key);
+  const options = recoveryOptions(storage);
+  if (!raw) return { status: "empty", state: createInitialState(), recoveryOptions: options };
+  try {
+    return { status: "ready", state: migrateAppState(JSON.parse(raw)), recoveryOptions: options };
+  } catch {
+    return { status: "corrupt", state: null, recoveryOptions: options, message: "Saved app data is corrupted. Restore a backup or continue with fresh state." };
+  }
+}
+
+export function loadState(): AppState {
+  const result = loadStateWithRecovery();
+  return result.state ?? createInitialState();
+}
+
+export function loadRecoveryBackup(kind: "snapshot" | "pre_restore_backup"): AppState | null {
+  if (typeof window === "undefined") return null;
+  const payload = readBackupPayload(window.localStorage, kind === "snapshot" ? SNAPSHOT_KEYS.current : PRE_RESTORE_BACKUP_KEY);
+  return payload ? migrateAppState(payload.appState) : null;
+}
+
+export function rotateStoredSnapshots(state: AppState, exportedAt = new Date().toISOString()) {
+  if (typeof window === "undefined") return;
+  const storage = window.localStorage;
+  const previousCurrent = storage.getItem(SNAPSHOT_KEYS.current);
+  const previous = storage.getItem(SNAPSHOT_KEYS.previous);
+  if (previous) storage.setItem(SNAPSHOT_KEYS.previousPrevious, previous);
+  if (previousCurrent) storage.setItem(SNAPSHOT_KEYS.previous, previousCurrent);
+  storage.setItem(SNAPSHOT_KEYS.current, JSON.stringify(createBackupPayload(state, exportedAt)));
+}
+
 export function saveState(state: AppState) {
-  if (typeof window !== "undefined") window.localStorage.setItem(key, JSON.stringify(migrateAppState(state)));
+  if (typeof window !== "undefined") {
+    const migrated = migrateAppState(state);
+    window.localStorage.setItem(key, JSON.stringify(migrated));
+    rotateStoredSnapshots(migrated);
+  }
 }
 
 export function resetState() {

@@ -28,9 +28,9 @@ export const removedTopLevelTabs = [
 
 export const screenGroups: Record<PrimaryNavigationId, string[]> = {
   Home: ["Readiness", "Today's plan", "Calories", "Weight", "Start Day"],
-  Train: ["Today's workout", "Today's run", "Start Training"],
-  Log: ["Daily check-in", "Workout logging", "Run logging", "Nutrition logging", "Body metrics logging"],
-  Progress: ["Weight trends", "Pace trends", "Mileage trends", "Weekly review", "Progress photos", "Race countdown", "Adherence metrics"],
+  Train: ["Warm-up", "Today's workout", "Today's run", "Cooldown", "Session summary", "Start Training"],
+  Log: ["Daily check-in", "Nutrition logging", "Body metrics logging", "Progress photos"],
+  Progress: ["Weight trends", "Pace trends", "Mileage trends", "Weekly review", "Race countdown", "Adherence metrics"],
   More: ["Settings", "Integrations", "Goals"],
 };
 

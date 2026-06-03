@@ -448,6 +448,14 @@ export interface PlanAdjustment {
   explanation?: CoachDecisionExplanation;
 }
 
+export interface RaceCalendarSettings {
+  raceDate?: string;
+  raceType?: "HalfMarathon" | "Marathon" | "10K" | "5K" | "Other";
+  targetRacePace?: number;
+  currentLongestRun?: number;
+  currentWeeklyMileage?: number;
+}
+
 export interface AppState {
   user: UserProfile;
   appMode: AppMode;
@@ -467,4 +475,5 @@ export interface AppState {
   postWorkoutRecommendations: PostWorkoutRecommendation[];
   adjustments: PlanAdjustment[];
   macroTargets: MacroTarget[];
+  raceCalendarSettings?: RaceCalendarSettings;
 }

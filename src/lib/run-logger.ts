@@ -1,4 +1,4 @@
-import type { AppState, RunLog, RunType } from "./types";
+import type { AppState, RunLog, RunType, Workout } from "./types";
 import { evaluateRunning, type RunningEngineInput, type RunningProgressionAction } from "./running-engine";
 
 export type NextRunDecision = "progress" | "repeat" | "deload";
@@ -35,6 +35,38 @@ export interface RunLoggerResult {
   recommendation: string;
   painWarning: string | null;
   reasons: string[];
+}
+
+export type TrainSessionBlockKind = "warm-up" | "lift" | "run" | "cooldown" | "summary";
+
+export interface TrainSessionBlock {
+  kind: TrainSessionBlockKind;
+  title: string;
+  description: string;
+  items: string[];
+}
+
+export interface BuildTrainSessionBlocksInput {
+  workout: Workout;
+  plannedRunDistance: number;
+  forceRun?: boolean;
+}
+
+export interface TrainRunLogInput {
+  id: string;
+  userId: string;
+  date: string;
+  runType: RunType;
+  plannedDistance: number;
+  actualDistance: number;
+  durationMinutes: number;
+  averagePace?: number;
+  averageHeartRate: number;
+  rpe: number;
+  pain: boolean;
+  painScore?: number;
+  notes: string;
+  walkBreaks?: boolean;
 }
 
 const round1 = (value: number) => Math.round(value * 10) / 10;
@@ -181,4 +213,98 @@ export function saveRunLoggerEntry(state: AppState, run: RunLog): { state: AppSt
     },
     result,
   };
+}
+
+function workoutHasLift(workout: Workout) {
+  if (!workout.exercises.length) return false;
+  if (/run|race|zone|cardio/i.test(workout.type) && workout.exercises.every((exercise) => /run|jog|walk|sprint|interval/i.test(exercise.name))) return false;
+  return workout.exercises.some((exercise) => !/run|jog|walk|sprint|interval/i.test(exercise.name));
+}
+
+function workoutHasRun(input: BuildTrainSessionBlocksInput) {
+  if (input.forceRun) return input.plannedRunDistance > 0;
+  if (input.workout.longRunMiles && input.workout.longRunMiles > 0) return true;
+  if (/run|race|zone|cardio/i.test(input.workout.type)) return true;
+  return input.workout.exercises.some((exercise) => /run|jog|walk|sprint|interval/i.test(exercise.name));
+}
+
+export function buildTrainSessionBlocks(input: BuildTrainSessionBlocksInput): TrainSessionBlock[] {
+  const liftScheduled = workoutHasLift(input.workout);
+  const runScheduled = workoutHasRun(input);
+  const blocks: TrainSessionBlock[] = [
+    {
+      kind: "warm-up",
+      title: "Warm-up",
+      description: "Prepare for today’s training before logging work.",
+      items: [
+        "5 minutes easy cardio or brisk walk",
+        "Dynamic mobility for hips, ankles, shoulders, and T-spine",
+        ...(liftScheduled ? ["Ramp-up sets before the first lift"] : []),
+        ...(runScheduled ? ["Easy jog/walk warm-up before the run"] : []),
+      ],
+    },
+  ];
+
+  if (liftScheduled) {
+    blocks.push({
+      kind: "lift",
+      title: input.workout.title,
+      description: "Execute and log lifting sets here in Train.",
+      items: input.workout.exercises.filter((exercise) => !/run|jog|walk|sprint|interval/i.test(exercise.name)).map((exercise) => `${exercise.order}. ${exercise.name}: ${exercise.prescribedSets} x ${exercise.prescribedReps}`),
+    });
+  }
+
+  if (runScheduled) {
+    const distance = input.workout.longRunMiles ?? input.plannedRunDistance;
+    blocks.push({
+      kind: "run",
+      title: distance > 0 ? `Run — ${distance} mi planned` : "Run",
+      description: "Log today’s run here in Train after completion.",
+      items: ["Capture actual distance, duration, pace if known, RPE, pain, and notes."],
+    });
+  }
+
+  blocks.push(
+    {
+      kind: "cooldown",
+      title: "Cooldown",
+      description: "Downshift after training before closing the session.",
+      items: ["5 minutes easy walk", "Breathing cooldown", "Light stretching/mobility", "Post-session notes"],
+    },
+    {
+      kind: "summary",
+      title: "Session summary",
+      description: "Review lift/run completion, readiness used, warnings, and next recommended action.",
+      items: [],
+    },
+  );
+
+  return blocks;
+}
+
+export function saveTrainRunLog(state: AppState, input: TrainRunLogInput): { state: AppState; result: RunLoggerResult; run: RunLog } {
+  const record = buildRunLoggerRecord({
+    id: input.id,
+    userId: input.userId,
+    date: input.date,
+    runType: input.runType,
+    distance: input.actualDistance,
+    durationMinutes: input.durationMinutes,
+    averagePace: input.averagePace,
+    averageHeartRate: input.averageHeartRate,
+    rpe: input.rpe,
+    walkBreaks: input.walkBreaks ?? false,
+    painScore: input.pain ? input.painScore ?? 1 : 0,
+    notes: input.notes,
+  });
+  const run: RunLog = {
+    ...record,
+    plannedDistance: input.plannedDistance,
+    actualDistance: input.actualDistance,
+    completed: input.actualDistance > 0 && input.durationMinutes > 0,
+    pain: input.pain || (input.painScore ?? 0) > 0,
+    painScore: input.pain ? input.painScore ?? 1 : input.painScore ?? 0,
+  };
+  const saved = saveRunLoggerEntry(state, run);
+  return { ...saved, run };
 }

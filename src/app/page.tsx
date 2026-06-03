@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   adjustWorkoutForReadiness,
   calculateReadiness,
@@ -16,19 +16,30 @@ import {
   buildRunTrendCards,
 } from "@/lib/coach-engine";
 import { deriveDailyCompletionStatus, evaluateDailyRecoveryStatus, upsertDailyCheckIn } from "@/lib/daily-checkin";
-import { getWorkoutForWeekDay } from "@/lib/seed-data";
+import { createInitialState, getWorkoutForWeekDay } from "@/lib/seed-data";
 import { buildWeightTrendDashboard } from "@/lib/weight-trend";
-import { buildRunLoggerRecord, saveRunLoggerEntry, type RunLoggerInput } from "@/lib/run-logger";
-import { buildWorkoutLoggerSession, saveWorkoutLoggerEntry, type WorkoutLoggerExerciseInput, type WorkoutLoggerInput, type WorkoutLoggerType } from "@/lib/workout-logger";
+import { saveTrainRunLog, type TrainRunLogInput } from "@/lib/run-logger";
+import { evaluateTraining, type TrainingEngineResult } from "@/lib/training-engine";
 import { buildNutritionUiV2Model, createMealFromNutritionUiV2ManualEntry, createMealFromNutritionUiV2SavedFood, syncNutritionLogFromNutritionUiV2Meals, type NutritionUiMealCategory } from "@/lib/nutrition-ui";
 import { buildConfirmedFoodAiMealLog, buildFoodAiMealFromMealLog, buildFoodAiReviewDraft, foodAiMealCategoryToMealLogType, type FoodAiReviewDraft, type FoodAiMode } from "@/lib/food-ai";
 import { buildWeeklyReviewSummary } from "@/lib/weekly-review";
 import { buildCompactAppChrome } from "@/lib/app-chrome";
 import { buildHomeCommandCenter } from "@/lib/home-command-center";
+import { buildProgressInsightsModel, type ProgressInsightTone } from "@/lib/progress-insights-ui";
+import { buildRaceCalendarUiModel, type RaceCalendarUiModel } from "@/lib/race-calendar-ui";
+import { buildRaceCalendarSettingsModel, saveRaceCalendarSettings, type RaceCalendarSettingsForm, type RaceCalendarSettingsModel } from "@/lib/race-calendar-settings-ui";
+import { buildMissionControlUiModel, type MissionControlUiModel } from "@/lib/mission-control-ui";
+import { buildMissionControlRoutes, type MissionControlRoute } from "@/lib/mission-control-routing";
+import { buildAuditCenterUiModel, type AuditCenterUiModel } from "@/lib/audit-center-ui";
+import { buildWeekReviewUiModel, type WeekReviewUiModel } from "@/lib/week-review-ui";
+import { evaluatePhysique } from "@/lib/physique-engine";
+import { evaluateOrchestrator } from "@/lib/orchestrator-engine";
 import { appNavigation, type PrimaryNavigationId } from "@/lib/navigation";
 import { createAuthAwarePersistenceContext, syncAppStateToSupabase, type AuthPersistenceContext } from "@/lib/supabase-persistence";
-import { buildAppStateBackupPayload, buildDataConfidenceNote, buildFoodScanProviderLabel, type DataConfidenceFocus, type DataConfidenceNote } from "@/lib/pre-test-cleanup-ui";
-import { loadState, saveState, todayIso, uid } from "@/lib/storage";
+import { buildDataConfidenceNote, buildFoodScanProviderLabel, type DataConfidenceFocus, type DataConfidenceNote } from "@/lib/pre-test-cleanup-ui";
+import { buildBackupDashboardModel, createBackupPayload, LAST_BACKUP_DATE_KEY, parseAndValidateBackupJson, restoreBackupPayload, type BackupValidationResult } from "@/lib/backup-restore";
+import { buildBodyMetricsSummary, buildLogSections, buildPhotoSectionSummary, humanizeDataQualityReason, type LogSectionId } from "@/lib/log-tab-ui";
+import { loadRecoveryBackup, loadStateWithRecovery, saveState, todayIso, uid, type StateLoadResult } from "@/lib/storage";
 import type { AppState, CoachDecision, DailyCheckIn, Exercise, FoodScanResult, FormQuality, ProgressPhoto, RunType, SetLog, WorkoutSession } from "@/lib/types";
 
 function classNames(...values: Array<string | false | undefined>) {
@@ -54,35 +65,68 @@ function EmptyState({ title, copy, action }: { title: string; copy: string; acti
 
 function DataConfidenceNotice({ note }: { note: DataConfidenceNote }) {
   const tone = note.confidence === "High" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : note.confidence === "Medium" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-red-300/25 bg-red-300/10 text-red-100";
-  return <div className={classNames("rounded-2xl border p-3 text-xs", tone)}><p className="font-black uppercase tracking-[0.18em]">{note.label}: {note.confidence}</p><p className="mt-1 opacity-90">{note.missingData.length ? `Missing: ${note.missingData.join("; ")}. Recommendations are useful for testing but should be treated as lower confidence until logged data fills in.` : "Enough recent data is present for this recommendation area."}</p></div>;
+  return <div className={classNames("rounded-2xl border p-3 text-xs", tone)}><p className="font-black uppercase tracking-[0.18em]">{note.label}: {note.confidence}</p><p className="mt-1 opacity-90">{note.missingData.length ? `Missing: ${note.missingData.map(humanizeDataQualityReason).join("; ")}. Recommendations are useful for testing but should be treated as lower confidence until logged data fills in.` : "Enough recent data is present for this recommendation area."}</p></div>;
 }
 
 function useDataConfidence(state: AppState, focus: DataConfidenceFocus) {
   return useMemo(() => buildDataConfidenceNote(state, focus, todayIso()), [state, focus]);
 }
 
+function currentWeekWindow(endDate: string) {
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 6);
+  return { weekStartDate: start.toISOString().slice(0, 10), weekEndDate: endDate };
+}
+
 function downloadAppStateBackup(state: AppState) {
   if (typeof window === "undefined") return;
   const exportedAt = new Date().toISOString();
-  const payload = buildAppStateBackupPayload(state, exportedAt);
+  const payload = createBackupPayload(state, exportedAt);
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = window.URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `greek-god-coach-app-state-${exportedAt.slice(0, 10)}.json`;
+  link.download = `greek-god-coach-backup-${exportedAt.slice(0, 10)}.json`;
   document.body.appendChild(link);
   link.click();
   link.remove();
   window.URL.revokeObjectURL(url);
+  window.localStorage.setItem(LAST_BACKUP_DATE_KEY, exportedAt);
 }
 
 const inputClass = "rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-white outline-none ring-amber-400/30 focus:ring-2";
 
-function Sparkline({ values, color = "#f59e0b" }: { values: number[]; color?: string }) {
+type ProgressSectionId = "weight" | "run" | "review" | "photos" | "race" | "adherence" | "goals" | "performance" | "physique" | "recovery" | "nutrition" | "strength" | "coachSummary" | "missing";
+
+const progressSectionIds = new Set<ProgressSectionId>(["weight", "run", "review", "photos", "race", "adherence", "goals", "performance", "physique", "recovery", "nutrition", "strength", "coachSummary", "missing"]);
+
+function toProgressSectionId(sectionId: string): ProgressSectionId {
+  return progressSectionIds.has(sectionId as ProgressSectionId) ? sectionId as ProgressSectionId : "missing";
+}
+
+function Sparkline({ values, color = "#fbbf24" }: { values: number[]; color?: string }) {
   if (values.length < 2) return <div className="h-24 rounded-2xl bg-white/[0.03]" />;
-  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(1, max - min);
   const points = values.map((v, i) => `${(i / (values.length - 1)) * 100},${90 - ((v - min) / span) * 80}`).join(" ");
   return <svg viewBox="0 0 100 100" className="h-24 w-full overflow-visible rounded-2xl bg-white/[0.03] p-2"><polyline fill="none" stroke={color} strokeWidth="3" points={points} vectorEffect="non-scaling-stroke" /></svg>;
+}
+
+function heightInches(height: string | number | undefined) {
+  if (typeof height === "number") return height;
+  const text = String(height ?? "");
+  const match = text.match(/(\d+)\D+(\d+)/);
+  return match ? Number(match[1]) * 12 + Number(match[2]) : 71;
+}
+
+function latestBodyMetrics(state: AppState) {
+  return [...(state.bodyMetrics ?? [])].sort((a, b) => a.date.localeCompare(b.date)).at(-1);
+}
+
+function priorBodyMetrics(state: AppState) {
+  return [...(state.bodyMetrics ?? [])].sort((a, b) => a.date.localeCompare(b.date)).at(-2);
 }
 
 export default function Home() {
@@ -90,10 +134,17 @@ export default function Home() {
   const [active, setActive] = useState<PrimaryNavigationId>("Home");
   const [selectedWeek, setSelectedWeek] = useState(1);
   const [selectedDay, setSelectedDay] = useState(0);
+  const [activeLogSection, setActiveLogSection] = useState<LogSectionId>("checkin");
+  const [activeProgressSection, setActiveProgressSection] = useState<ProgressSectionId>("weight");
   const [persistenceContext, setPersistenceContext] = useState<AuthPersistenceContext | null>(null);
   const [persistenceStatus, setPersistenceStatus] = useState("localStorage fallback");
+  const [stateLoadResult, setStateLoadResult] = useState<StateLoadResult | null>(null);
 
-  useEffect(() => setState(loadState()), []);
+  useEffect(() => {
+    const result = loadStateWithRecovery();
+    setStateLoadResult(result);
+    if (result.state) setState(result.state);
+  }, []);
   useEffect(() => { void createAuthAwarePersistenceContext().then(setPersistenceContext).catch(() => setPersistenceContext({ mode: "localStorage", client: null })); }, []);
   useEffect(() => {
     if (!state) return;
@@ -128,7 +179,71 @@ export default function Home() {
   const runningRecommendation = useMemo(() => state && readiness && runTrends ? generateRunningRecommendation({ runLogs: state.runLogs ?? [], nextDayReadiness: readiness.status, plannedDistance: plannedRunDistance, runType: currentWorkout.longRunMiles ? "Long run" : "Zone 2", currentWeeklyMileage: runTrends.weeklyMileage, previousWeeklyMileage: Math.max(0, runTrends.weeklyMileage - plannedRunDistance) }) : null, [state, readiness, runTrends, plannedRunDistance, currentWorkout.longRunMiles]);
   const nextRunLabel = runningRecommendation ? `${runningRecommendation.action}: ${runningRecommendation.recommendedDistance} mi` : `${plannedRunDistance} mi planned`;
   const dailyPrescription = useMemo(() => state && latestCheckIn && macroTarget && readiness ? generateDailyPrescription({ readiness, checkIn: latestCheckIn, workout: currentWorkout, macroTarget, nutritionLogs: state.nutritionLogs, bodyMetrics: state.bodyMetrics, trainingAdherence, postWorkoutRecommendations: state.postWorkoutRecommendations, runningRecommendation: runningRecommendation ?? undefined }) : null, [state, latestCheckIn, macroTarget, readiness, currentWorkout, trainingAdherence, runningRecommendation]);
-  const homeCommandCenter = useMemo(() => state && macroTarget && readiness && dailyPrescription ? buildHomeCommandCenter(state, { today: todayIso(), readinessStatus: readiness.status, todaysWorkout: adjustedWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription.exactWorkoutRecommendation }) : null, [state, macroTarget, readiness, dailyPrescription, adjustedWorkout.title, nextRunLabel]);
+  const homeCommandCenter = useMemo(() => state && macroTarget && readiness && dailyPrescription ? buildHomeCommandCenter(state, { today: todayIso(), readinessStatus: readiness.status, todaysWorkout: adjustedWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription.exactWorkoutRecommendation, scheduledWorkout: adjustedWorkout, scheduledRun: { type: currentWorkout.longRunMiles ? "long" : "easy", title: nextRunLabel, distanceMiles: runningRecommendation?.recommendedDistance ?? plannedRunDistance } }) : null, [state, macroTarget, readiness, dailyPrescription, adjustedWorkout, currentWorkout.longRunMiles, nextRunLabel, runningRecommendation?.recommendedDistance, plannedRunDistance]);
+  const missionControlContext = useMemo(() => {
+    if (!state || !homeCommandCenter) return null;
+    const latest = latestBodyMetrics(state);
+    const prior = priorBodyMetrics(state);
+    const physiqueEngineResult = evaluatePhysique({
+      weight: latest?.weight,
+      waist: latest?.waist,
+      neck: (latest as { neck?: number } | undefined)?.neck,
+      height: heightInches(state.user.height),
+      priorWeight: prior?.weight,
+      priorWaist: prior?.waist,
+      priorNeck: (prior as { neck?: number } | undefined)?.neck,
+      proteinAdherence: homeCommandCenter.performanceEngineResult.nutritionTrend.score,
+      calorieAdherence: homeCommandCenter.performanceEngineResult.nutritionTrend.score,
+      workoutAdherence: homeCommandCenter.performanceEngineResult.adherenceTrend.score,
+      strengthTrend: homeCommandCenter.performanceEngineResult.strengthTrend.status,
+      photoCount: state.photos?.length ?? 0,
+      photoConsistency: state.photos?.length ? 80 : 0,
+    });
+    const orchestratorEngineResult = evaluateOrchestrator({
+      progressionEngineResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingEngineResult: homeCommandCenter.goalTrackingEngineResult,
+      trainingEngineResult: homeCommandCenter.trainingEngineResult,
+      performanceEngineResult: homeCommandCenter.performanceEngineResult,
+      physiqueEngineResult,
+    });
+    const raceCalendar = buildRaceCalendarUiModel(state, { today: todayIso() });
+    const missionControl = buildMissionControlUiModel({
+      orchestratorEngineResult,
+      performanceEngineResult: homeCommandCenter.performanceEngineResult,
+      physiqueEngineResult,
+      goalTrackingEngineResult: homeCommandCenter.goalTrackingEngineResult,
+      raceCalendarEngineResult: raceCalendar.engineResults.raceCalendar,
+      progressionEngineResult: homeCommandCenter.progressionEngineResult,
+      trainingEngineResult: homeCommandCenter.trainingEngineResult,
+    });
+    const auditCenter = buildAuditCenterUiModel({
+      readinessEngineResult: readiness,
+      progressionEngineResult: homeCommandCenter.progressionEngineResult,
+      performanceEngineResult: homeCommandCenter.performanceEngineResult,
+      physiqueEngineResult,
+      raceCalendarEngineResult: raceCalendar.engineResults.raceCalendar,
+      orchestratorEngineResult,
+    });
+    const weekWindow = currentWeekWindow(todayIso());
+    const weekReview = buildWeekReviewUiModel({
+      ...weekWindow,
+      workoutsPlanned: 4,
+      runsPlanned: 3,
+      workoutSessions: state.workoutSessions ?? [],
+      runLogs: state.runLogs ?? [],
+      nutritionLogs: state.nutritionLogs ?? [],
+      checkIns: state.checkIns ?? [],
+      bodyMetrics: state.bodyMetrics ?? [],
+      progressionEngineResult: homeCommandCenter.progressionEngineResult,
+      performanceEngineResult: homeCommandCenter.performanceEngineResult,
+      physiqueEngineResult,
+      orchestratorEngineResult,
+    });
+    return { missionControl, auditCenter, weekReview };
+  }, [state, homeCommandCenter, readiness]);
+  const missionControl = missionControlContext?.missionControl ?? null;
+  const auditCenter = missionControlContext?.auditCenter ?? null;
+  const weekReview = missionControlContext?.weekReview ?? null;
   useEffect(() => {
     if (!state || !dailyPrescription || !readiness || !latestCheckIn) return;
     const day = dailyPrescription.date.slice(0, 10);
@@ -148,9 +263,43 @@ export default function Home() {
     const newDecisions = autoDecisions.filter((entry) => !existingKeys.has(`${day}:${entry.category ?? entry.adjustmentType}:${entry.previousValue}:${entry.newValue}`));
     if (newDecisions.length) setState({ ...state, adjustments: [...state.adjustments, ...newDecisions] });
   }, [state, dailyPrescription, readiness, latestCheckIn, currentWorkout, runningRecommendation, plannedRunDistance]);
-  if (!state || !readiness || !macroTarget || !trend || !weeklyReview || !dailyPrescription || !homeCommandCenter) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
+  if (stateLoadResult?.status === "corrupt") {
+    return <RecoveryScreen
+      result={stateLoadResult}
+      onContinueFresh={() => {
+        const freshState = createInitialState();
+        saveState(freshState);
+        setState(freshState);
+        setStateLoadResult({ status: "ready", state: freshState, recoveryOptions: stateLoadResult.recoveryOptions });
+      }}
+      onRestoreSnapshot={() => {
+        const recovered = loadRecoveryBackup("snapshot");
+        if (!recovered) return;
+        saveState(recovered);
+        setState(recovered);
+        setStateLoadResult({ status: "ready", state: recovered, recoveryOptions: { hasSnapshot: true, hasPreRestoreBackup: stateLoadResult.recoveryOptions.hasPreRestoreBackup } });
+      }}
+      onRestorePreRestore={() => {
+        const recovered = loadRecoveryBackup("pre_restore_backup");
+        if (!recovered) return;
+        saveState(recovered);
+        setState(recovered);
+        setStateLoadResult({ status: "ready", state: recovered, recoveryOptions: { hasSnapshot: stateLoadResult.recoveryOptions.hasSnapshot, hasPreRestoreBackup: true } });
+      }}
+    />;
+  }
+  if (!state || !readiness || !macroTarget || !trend || !weeklyReview || !dailyPrescription || !homeCommandCenter || !missionControl || !auditCenter || !weekReview) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
 
   const updateState = (next: AppState) => setState(next);
+  const missionControlRoutes = buildMissionControlRoutes(missionControl);
+  const handleMissionControlRoute = (route: MissionControlRoute) => {
+    if (route.destination === "training") {
+      setActive("Train");
+      return;
+    }
+    setActiveProgressSection(route.destination === "raceCalendar" ? "race" : toProgressSectionId(route.sectionId));
+    setActive("Progress");
+  };
   const appChrome = buildCompactAppChrome({ currentWeek: selectedWeek });
   return <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#3f2f12,transparent_30%),linear-gradient(135deg,#050505,#111111_50%,#050505)] text-zinc-100">
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -163,80 +312,362 @@ export default function Home() {
       </header>
 
       <div className="py-2">
-        {active === "Home" && <Dashboard model={homeCommandCenter} state={state} onStartDay={() => setActive("Log")} />}
-        {active === "Train" && <TrainScreen state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={adjustedWorkout} originalWorkout={currentWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} runTrends={runTrends} plannedRunDistance={plannedRunDistance} />}
-        {active === "Log" && <LogScreen state={state} updateState={updateState} readiness={readiness} trend={trend} />}
-        {active === "Progress" && <ProgressScreen state={state} updateState={updateState} weeklyReview={weeklyReview} />}
+        {active === "Home" && <Dashboard model={homeCommandCenter} missionControl={missionControl} auditCenter={auditCenter} weekReview={weekReview} missionRoutes={missionControlRoutes} onMissionRoute={handleMissionControlRoute} onDailyCheckIn={() => { setActiveLogSection("checkin"); setActive("Log"); }} onStartWorkout={() => setActive("Train")} onWeeklyCheckIn={() => { setActiveLogSection("body"); setActive("Log"); }} />}
+        {active === "Train" && <TrainScreen state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={adjustedWorkout} originalWorkout={currentWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} runTrends={runTrends} plannedRunDistance={plannedRunDistance} trainingEngineResult={homeCommandCenter.trainingEngineResult} />}
+        {active === "Log" && <LogScreen state={state} updateState={updateState} readiness={readiness} trend={trend} section={activeLogSection} setSection={setActiveLogSection} />}
+        {active === "Progress" && <ProgressScreen state={state} updateState={updateState} weeklyReview={weeklyReview} section={activeProgressSection} setSection={setActiveProgressSection} />}
         {active === "More" && <MoreScreen state={state} updateState={updateState} />}
       </div>
     </div>
   </main>;
 }
 
-function Dashboard({ model, state, onStartDay }: { model: ReturnType<typeof buildHomeCommandCenter>; state: AppState; onStartDay: () => void }) {
-  const readinessTone = model.readinessStatus === "Green" ? "text-emerald-300" : model.readinessStatus === "Yellow" ? "text-amber-300" : "text-red-300";
-  const readinessNote = useDataConfidence(state, "readiness");
-  const workoutNote = useDataConfidence(state, "workout");
-  const runningNote = useDataConfidence(state, "running");
-  const metric = (label: string, value: string | number, tone = "text-white") => <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">{label}</p><p className={`mt-1 truncate text-lg font-black ${tone}`}>{value}</p></div>;
-  return <section className="rounded-3xl border border-amber-300/30 bg-[radial-gradient(circle_at_top_right,rgba(251,191,36,.18),transparent_35%),rgba(69,26,3,.18)] p-4 shadow-2xl shadow-black/30">
-    <p className="text-xs uppercase tracking-[0.25em] text-amber-300/80">Home</p>
-    <h2 className="mt-1 text-2xl font-black text-white">Today’s coach brief</h2>
-    <div className="mt-4 grid grid-cols-2 gap-3">
-      {metric("Readiness", model.readinessStatus, readinessTone)}
-      {metric("Today’s plan", `${model.todaysWorkout} · ${model.todaysRun}`)}
-      {metric("Calories", model.caloriesRemaining)}
-      {metric("Weight", model.currentWeight === null ? "—" : `${model.currentWeight} lb`)}
+function RecoveryScreen({ result, onRestoreSnapshot, onRestorePreRestore, onContinueFresh }: { result: Extract<StateLoadResult, { status: "corrupt" }>; onRestoreSnapshot: () => void; onRestorePreRestore: () => void; onContinueFresh: () => void }) {
+  return <main className="min-h-screen bg-black p-6 text-white">
+    <div className="mx-auto max-w-3xl rounded-3xl border border-red-300/30 bg-red-950/30 p-6 shadow-2xl shadow-black/40">
+      <p className="text-xs font-black uppercase tracking-[0.25em] text-red-200">Recovery mode</p>
+      <h1 className="mt-2 text-3xl font-black">Saved app data needs attention</h1>
+      <p className="mt-3 text-zinc-200">{result.message} Your data was not silently erased.</p>
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <button type="button" disabled={!result.recoveryOptions.hasSnapshot} onClick={onRestoreSnapshot} className="rounded-2xl bg-emerald-400 px-4 py-3 font-black text-black disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">Restore latest snapshot</button>
+        <button type="button" disabled={!result.recoveryOptions.hasPreRestoreBackup} onClick={onRestorePreRestore} className="rounded-2xl bg-amber-400 px-4 py-3 font-black text-black disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">Revert pre-restore backup</button>
+        <button type="button" onClick={onContinueFresh} className="rounded-2xl border border-white/15 px-4 py-3 font-black text-white">Continue with fresh state</button>
+      </div>
     </div>
-    <div className="mt-4 grid gap-2 lg:grid-cols-3"><DataConfidenceNotice note={readinessNote} /><DataConfidenceNotice note={workoutNote} /><DataConfidenceNotice note={runningNote} /></div>
-    <button type="button" onClick={onStartDay} className="mt-4 w-full rounded-2xl bg-amber-400 px-4 py-3 text-base font-black text-black shadow-lg shadow-amber-950/20">Start Day</button>
+  </main>;
+}
+
+function RouteButton({ children, onClick, className }: { children: ReactNode; onClick: () => void; className: string }) {
+  return <div role="button" tabIndex={0} onClick={onClick} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onClick(); }} className={`${className} cursor-pointer text-left transition hover:border-amber-300/50 hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-amber-300/50`}>{children}</div>;
+}
+
+function MissionControlDashboard({ model, routes, onRoute }: { model: MissionControlUiModel; routes: ReturnType<typeof buildMissionControlRoutes>; onRoute: (route: MissionControlRoute) => void }) {
+  return <section className="grid gap-3 rounded-3xl border border-amber-300/40 bg-[radial-gradient(circle_at_top,rgba(251,191,36,.18),transparent_42%),rgba(15,15,15,.92)] p-4 shadow-2xl shadow-black/40">
+    <div>
+      <p className="text-xs font-black uppercase tracking-[0.25em] text-amber-300/80">Mission Control</p>
+      <h2 className="mt-1 text-3xl font-black tracking-tight text-white">{model.primaryMission.value}</h2>
+      <p className="mt-1 text-sm text-zinc-400">{model.todayFocus.value}</p>
+    </div>
+    <div className="grid gap-3">
+      <RouteButton onClick={() => onRoute(routes.primaryMission)} className="rounded-3xl border border-white/10 bg-black/35 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Today’s Mission</p><div className="mt-3 grid gap-2"><Stat label={model.primaryMission.label} value={model.primaryMission.value} tone="yellow" /><Stat label={model.secondaryMission.label} value={model.secondaryMission.value} /><Stat label={model.todayFocus.label} value={model.todayFocus.value} /></div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.biggestRisk)} className="rounded-3xl border border-red-300/20 bg-red-950/20 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-red-200/70">Biggest Risk</p><p className="mt-2 text-2xl font-black text-red-100">{model.biggestRisk.value}</p>{model.biggestRisk.severity && <p className="mt-1 text-xs font-bold uppercase tracking-[0.18em] text-red-200/70">Severity: {model.biggestRisk.severity}</p>}</RouteButton>
+      <RouteButton onClick={() => onRoute(routes.biggestOpportunity)} className="rounded-3xl border border-emerald-300/20 bg-emerald-950/20 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-emerald-200/70">Biggest Opportunity</p><p className="mt-2 text-2xl font-black text-emerald-100">{model.biggestOpportunity.value}</p></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.weeklyDecision)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">This Week’s Decision</p><h2 className="mt-1 text-2xl font-black text-white">{model.weekFocus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.weeklyDecision.label} value={model.weeklyDecision.value} /><Stat label={model.nutritionDecision.label} value={model.nutritionDecision.value} /><Stat label={model.decisionConfidence.label} value={model.decisionConfidence.value} /></div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.performanceSnapshot)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Performance Snapshot</p><h2 className="mt-1 text-2xl font-black text-white">{model.performanceStatus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.performanceScore.label} value={model.performanceScore.value} /><Stat label={model.performanceStatus.label} value={model.performanceStatus.value} sub={model.performanceStatus.sub} /><Stat label="Confidence" value={model.performanceStatus.sub ?? "Unknown"} /></div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.physiqueSnapshot)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Physique Snapshot</p><h2 className="mt-1 text-2xl font-black text-white">{model.physiqueStatus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.physiqueScore.label} value={model.physiqueScore.value} /><Stat label={model.physiqueStatus.label} value={model.physiqueStatus.value} sub={model.physiqueStatus.sub} /><Stat label="Confidence" value={model.physiqueStatus.sub ?? "Unknown"} /></div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.raceStatus)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Race Status</p><h2 className="mt-1 text-2xl font-black text-white">{model.raceReadiness.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.raceReadiness.label} value={model.raceReadiness.value} /><Stat label={model.racePhase.label} value={model.racePhase.value} /><Stat label={model.raceWeeksRemaining.label} value={model.raceWeeksRemaining.value} /></div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.goalStatus)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Goal Status</p><h2 className="mt-1 text-2xl font-black text-white">Goal tracking engine results</h2><div className="mt-3 grid gap-3 sm:grid-cols-2">{model.goalStatuses.map((goal) => <Stat key={goal.label} label={goal.label} value={goal.status} sub={`Confidence: ${goal.confidence}`} />)}</div></RouteButton>
+      <RouteButton onClick={() => onRoute(routes.coachSummary)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">{model.coachSummary.label}</p><h2 className="mt-1 text-2xl font-black text-white">Coach Summary</h2><p className="mt-3 text-sm leading-6 text-zinc-200">{model.coachSummary.value}</p></RouteButton>
+    </div>
   </section>;
 }
 
-function TrainScreen({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance }: any) {
-  return <TrainingPlan state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={workout} originalWorkout={originalWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} plannedRunDistance={plannedRunDistance} />;
+function AuditCenter({ model }: { model: AuditCenterUiModel }) {
+  const sourceLabel = (source: string) => source === "RaceCalendar" ? "Race" : source;
+  const countEntries = Object.entries(model.sourceCounts);
+  return <section className="rounded-3xl border border-sky-300/25 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,.14),transparent_35%),rgba(15,15,15,.88)] p-4 shadow-2xl shadow-black/30">
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-200/80">Audit Center</p>
+        <h2 className="mt-1 text-2xl font-black text-white">Audit Summary</h2>
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-right">
+        <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Total audit entries</p>
+        <p className="text-2xl font-black text-white">{model.totalEntries}</p>
+      </div>
+    </div>
+    <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      {countEntries.map(([source, count]) => <div key={source} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{sourceLabel(source)}</p><p className="mt-1 text-xl font-black text-white">{count}</p></div>)}
+    </div>
+    {model.entries.length === 0 ? <p className="mt-4 rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-4 text-sm text-zinc-300">No audit data available yet.</p> : <div className="mt-4 grid gap-2">
+      {model.entries.slice(0, 12).map((entry, index) => <div key={`${entry.source}-${index}-${entry.message}`} className="rounded-2xl border border-white/10 bg-black/25 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-sky-200/20 bg-sky-300/10 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-sky-100">{sourceLabel(entry.source)}</span>
+          {entry.confidence && <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-300">Confidence: {entry.confidence}</span>}
+          {entry.timestamp && <span className="text-[11px] text-zinc-500">{entry.timestamp}</span>}
+        </div>
+        <p className="mt-2 text-sm leading-6 text-zinc-200">{entry.message}</p>
+      </div>)}
+    </div>}
+  </section>;
 }
 
-function LogScreen({ state, updateState, readiness, trend }: any) {
-  const [section, setSection] = useState<"checkin" | "workout" | "run" | "nutrition" | "body">("checkin");
-  const options = [
-    ["checkin", "Daily check-in"],
-    ["workout", "Workout logging"],
-    ["run", "Run logging"],
-    ["nutrition", "Nutrition logging"],
-    ["body", "Body metrics logging"],
-  ] as const;
+function WeekInReview({ model }: { model: WeekReviewUiModel }) {
+  const empty = model.weekOutcome === "Insufficient Data";
+  return <section className="rounded-3xl border border-emerald-300/25 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,.14),transparent_35%),rgba(15,15,15,.88)] p-4 shadow-2xl shadow-black/30">
+    <p className="text-xs font-black uppercase tracking-[0.25em] text-emerald-200/80">Week-In-Review</p>
+    <h2 className="mt-1 text-2xl font-black text-white">{empty ? "Weekly report pending" : model.weekOutcome}</h2>
+    {empty ? <p className="mt-4 rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-4 text-sm text-zinc-300">{model.summary}</p> : <div className="mt-4 grid gap-4">
+      <div className="grid gap-2 sm:grid-cols-3">
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Workout adherence</p><p className="mt-1 text-xl font-black text-white">{model.workoutsCompleted} / {model.workoutsPlanned}</p></div>
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Run adherence</p><p className="mt-1 text-xl font-black text-white">{model.runsCompleted} / {model.runsPlanned}</p></div>
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Nutrition adherence</p><p className="mt-1 text-xl font-black text-white">{model.nutritionAdherence}%</p></div>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Body Metrics</p>
+          <p className="mt-2 text-sm text-zinc-300">Average weight: <span className="font-bold text-white">{model.averageWeight !== undefined ? `${model.averageWeight} lb` : "Need more measurements"}</span></p>
+          <p className="text-sm text-zinc-300">Weight trend: <span className="font-bold text-white">{model.weightTrend ?? "Need more measurements"}</span></p>
+          <p className="text-sm text-zinc-300">Physique trend: <span className="font-bold text-white">{model.physiqueTrend ?? "No physique trend yet"}</span></p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Recovery</p>
+          <p className="mt-2 text-sm text-zinc-300">Readiness trend: <span className="font-bold text-white">{model.readinessTrend ?? "Need more check-ins"}</span></p>
+          <p className="text-sm text-zinc-300">Recovery trend: <span className="font-bold text-white">{model.recoveryTrend ?? "Need more check-ins"}</span></p>
+        </div>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="rounded-2xl border border-emerald-300/15 bg-emerald-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-200">Biggest Win</p><p className="mt-2 text-sm text-white">{model.biggestWin ?? "No clear weekly win yet"}</p></div>
+        <div className="rounded-2xl border border-amber-300/15 bg-amber-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-amber-200">Biggest Risk</p><p className="mt-2 text-sm text-white">{model.biggestRisk ?? "No major weekly risk surfaced"}</p></div>
+        <div className="rounded-2xl border border-sky-300/15 bg-sky-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-sky-200">Next Week Focus</p><p className="mt-2 text-sm text-white">{model.nextWeekFocus ?? "Keep building consistency"}</p></div>
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Executive Summary</p><p className="mt-2 text-sm leading-6 text-zinc-200">{model.summary}</p></div>
+    </div>}
+  </section>;
+}
+
+function Dashboard({ model, missionControl, auditCenter, weekReview, missionRoutes, onMissionRoute, onDailyCheckIn, onStartWorkout, onWeeklyCheckIn }: { model: ReturnType<typeof buildHomeCommandCenter>; missionControl: MissionControlUiModel; auditCenter: AuditCenterUiModel; weekReview: WeekReviewUiModel; missionRoutes: ReturnType<typeof buildMissionControlRoutes>; onMissionRoute: (route: MissionControlRoute) => void; onDailyCheckIn: () => void; onStartWorkout: () => void; onWeeklyCheckIn: () => void }) {
+  const readinessTone = model.coachBrief.readiness === "Green" ? "text-emerald-300" : model.coachBrief.readiness === "Yellow" ? "text-amber-300" : "text-red-300";
+  const statusTone = (status: string) => status === "On Track" ? "text-emerald-300" : status === "At Risk" ? "text-amber-300" : status === "Off Track" ? "text-red-300" : "text-zinc-400";
+  const metric = (label: string, value: string | number, tone = "text-white") => <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">{label}</p><p className={`mt-1 truncate text-lg font-black ${tone}`}>{value}</p></div>;
   return <div className="grid gap-4">
-    <section className="grid grid-cols-2 gap-2 sm:grid-cols-5">{options.map(([id, label]) => <button key={id} type="button" onClick={() => setSection(id)} className={classNames("rounded-2xl px-3 py-3 text-sm font-black", section === id ? "bg-amber-400 text-black" : "bg-white/5 text-zinc-300")}>{label}</button>)}</section>
-    {section === "checkin" && <DailyCheckInForm state={state} updateState={updateState} readiness={readiness} />}
-    {section === "workout" && <WorkoutLogger state={state} updateState={updateState} />}
-    {section === "run" && <Running state={state} updateState={updateState} plannedDistance={3} />}
-    {section === "nutrition" && <NutritionLogger state={state} updateState={updateState} />}
-    {section === "body" && <BodyMetrics state={state} updateState={updateState} trend={trend} />}
+    <MissionControlDashboard model={missionControl} routes={missionRoutes} onRoute={onMissionRoute} />
+    <AuditCenter model={auditCenter} />
+    <WeekInReview model={weekReview} />
+    <section className="rounded-3xl border border-amber-300/30 bg-[radial-gradient(circle_at_top_right,rgba(251,191,36,.18),transparent_35%),rgba(69,26,3,.18)] p-4 shadow-2xl shadow-black/30">
+    <p className="text-xs uppercase tracking-[0.25em] text-amber-300/80">Home</p>
+    <h2 className="mt-1 text-2xl font-black text-white">Today’s coach brief</h2>
+
+    <div className="mt-4 grid grid-cols-3 gap-2">
+      {metric("Readiness", model.coachBrief.readiness, readinessTone)}
+      {metric("Goal Status", model.coachBrief.overallGoalStatus, statusTone(model.coachBrief.overallGoalStatus))}
+      {metric("Weekly Decision", model.coachBrief.weeklyDecision)}
+    </div>
+
+    <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <h3 className="text-lg font-black text-white">Today’s Goals</h3>
+        <div className="mt-3 grid gap-2">
+          {model.todaysGoals.map((goal) => <div key={`${goal.priority}-${goal.label}`} className="flex gap-2 rounded-xl bg-white/[0.04] p-3 text-sm text-zinc-200"><span className="text-emerald-300">✓</span><div><p className="font-semibold text-white">{goal.label}</p><p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{goal.priority} · {goal.source}</p></div></div>)}
+        </div>
+      </div>
+
+      <div className="grid gap-3">
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+          <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Goal Status</h3>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+            {Object.entries(model.goalStatuses).map(([label, status]) => <div key={label} className="rounded-xl bg-white/[0.04] p-3"><p className="text-zinc-400">{label}</p><p className={`font-black ${statusTone(status)}`}>{status}</p></div>)}
+          </div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+          <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Today’s Training</h3>
+          <div className="mt-3 grid gap-2 text-sm">
+            <p className="rounded-xl bg-white/[0.04] p-3"><b className="text-white">Today’s Workout:</b> {model.training.workout.name} · {model.training.workout.estimatedDurationMinutes} min · {model.training.workout.status}</p>
+            <p className="rounded-xl bg-white/[0.04] p-3"><b className="text-white">Today’s Run:</b> {model.training.run.name} · {model.training.run.estimatedDurationMinutes} min · {model.training.run.status}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div className="mt-4 grid gap-3 lg:grid-cols-2">
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Recovery</h3>
+        <p className="mt-2 text-sm text-zinc-300">Readiness: <b className={readinessTone}>{model.recovery.readiness}</b> · Confidence: <b className="text-white">{model.recovery.confidence}</b></p>
+        {model.recovery.warning && <p className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-sm text-amber-100">Warning: {model.recovery.warning}</p>}
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+        <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">{model.confidenceCards[0].label}</h3>
+        <p className="mt-2 text-sm text-zinc-300">Data Quality: <b className="text-white">{model.confidenceCards[0].value}</b></p>
+        <p className="mt-1 text-xs text-zinc-500">Reason: {model.confidenceCards[0].reason}</p>
+      </div>
+    </div>
+
+    {model.sundayPrompt.visible && <div className="mt-4 rounded-2xl border border-sky-300/25 bg-sky-300/10 p-4">
+      <h3 className="font-black text-sky-100">{model.sundayPrompt.title}</h3>
+      <p className="mt-1 text-sm text-sky-100/80">Please log: {model.sundayPrompt.items.join(", ")}</p>
+      <button type="button" onClick={onWeeklyCheckIn} className="mt-3 rounded-xl bg-sky-300 px-4 py-2 text-sm font-black text-black">{model.sundayPrompt.buttonLabel}</button>
+    </div>}
+
+    <div className="mt-4 grid gap-2 sm:grid-cols-2">
+      <button type="button" onClick={onDailyCheckIn} className="rounded-2xl bg-white px-4 py-3 text-base font-black text-black shadow-lg shadow-black/20">{model.actions.dailyCheckIn.label}</button>
+      <button type="button" onClick={onStartWorkout} className="rounded-2xl bg-amber-400 px-4 py-3 text-base font-black text-black shadow-lg shadow-amber-950/20">{model.actions.startWorkout.label}</button>
+    </div>
+    </section>
   </div>;
 }
 
-function ProgressScreen({ state, updateState, weeklyReview }: { state: AppState; updateState: (s: AppState) => void; weeklyReview: ReturnType<typeof buildWeeklyReviewSummary> | null }) {
-  const [section, setSection] = useState<"weight" | "run" | "review" | "photos" | "race" | "adherence">("weight");
+function TrainScreen({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance, trainingEngineResult }: any) {
+  return <TrainingPlan state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={workout} originalWorkout={originalWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} plannedRunDistance={plannedRunDistance} trainingEngineResult={trainingEngineResult} />;
+}
+
+function LogScreen({ state, updateState, readiness, trend, section, setSection }: { state: AppState; updateState: (s: AppState) => void; readiness: any; trend: any; section: LogSectionId; setSection: (section: LogSectionId) => void }) {
+  const options = buildLogSections();
+  return <div className="grid gap-4">
+    <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">{options.map((option) => <button key={option.id} type="button" onClick={() => setSection(option.id)} className={classNames("rounded-2xl px-3 py-3 text-sm font-black", section === option.id ? "bg-amber-400 text-black" : "bg-white/5 text-zinc-300")}>{option.label}</button>)}</section>
+    <Card eyebrow="Log = reporting" title={options.find((option) => option.id === section)?.label ?? "Daily Check-In"}>
+      <p className="text-sm text-zinc-400">{options.find((option) => option.id === section)?.description}</p>
+      <div className="mt-3 flex flex-wrap gap-2">{(options.find((option) => option.id === section)?.fields ?? []).map((field) => <span key={field} className="rounded-full bg-white/5 px-3 py-1 text-xs font-bold text-zinc-300">{field}</span>)}</div>
+    </Card>
+    {section === "checkin" && <DailyCheckInForm state={state} updateState={updateState} readiness={readiness} />}
+    {section === "nutrition" && <NutritionLogger state={state} updateState={updateState} />}
+    {section === "body" && <BodyMetrics state={state} updateState={updateState} trend={trend} />}
+    {section === "photos" && <ProgressPhotos state={state} updateState={updateState} />}
+  </div>;
+}
+
+function insightTone(tone: ProgressInsightTone): "green" | "yellow" | "red" | "neutral" {
+  if (tone === "positive") return "green";
+  if (tone === "warning") return "yellow";
+  if (tone === "negative") return "red";
+  return "neutral";
+}
+
+function ProgressScreen({ state, updateState, weeklyReview, section, setSection }: { state: AppState; updateState: (s: AppState) => void; weeklyReview: ReturnType<typeof buildWeeklyReviewSummary> | null; section: ProgressSectionId; setSection: (section: ProgressSectionId) => void }) {
   const weightDashboard = buildWeightTrendDashboard(state.bodyMetrics ?? [], { startingWeight: 233, goalWeight: 199.9 });
   const runTrends = calculateRunTrends(state.runLogs ?? []);
-  const raceDays = buildHomeCommandCenter(state, { today: todayIso(), readinessStatus: "Green", todaysWorkout: "", todaysRun: "", macroTarget: state.macroTargets[0], coachRecommendation: "" }).daysUntilRace;
-  const options = [
+  const commandCenter = buildHomeCommandCenter(state, { today: todayIso(), readinessStatus: "Green", todaysWorkout: "", todaysRun: "", macroTarget: state.macroTargets[0], coachRecommendation: "" });
+  const raceCalendar = buildRaceCalendarUiModel(state, { today: todayIso() });
+  const raceSettings = buildRaceCalendarSettingsModel(state);
+  const insights = buildProgressInsightsModel({ performanceEngineResult: commandCenter.performanceEngineResult, goalTrackingEngineResult: commandCenter.goalTrackingEngineResult, progressionEngineResult: commandCenter.progressionEngineResult });
+  const options: [ProgressSectionId, string][] = [
     ["weight", "Weight trends"],
     ["run", "Pace trends / Mileage trends"],
     ["review", "Weekly review"],
     ["photos", "Progress photos"],
     ["race", "Race countdown"],
     ["adherence", "Adherence metrics"],
-  ] as const;
+    ["goals", "Goal Status"],
+    ["performance", "Performance"],
+    ["physique", "Physique"],
+    ["recovery", "Recovery"],
+    ["nutrition", "Nutrition"],
+    ["strength", "Strength"],
+  ];
   return <div className="grid gap-4">
     <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">{options.map(([id, label]) => <button key={id} type="button" onClick={() => setSection(id)} className={classNames("rounded-2xl px-3 py-3 text-sm font-black", section === id ? "bg-amber-400 text-black" : "bg-white/5 text-zinc-300")}>{label}</button>)}</section>
+
+    <Card eyebrow="Performance Overview" title="Am I improving?">
+      <div className="grid gap-3 sm:grid-cols-4">
+        <Stat label="Overall Performance Score" value={insights.overview.scoreLabel} tone={insightTone(insights.overview.tone)} />
+        <Stat label="Status" value={insights.overview.status} tone={insightTone(insights.overview.tone)} />
+        <Stat label="Confidence" value={insights.overview.confidence} />
+        <Stat label="Data quality" value={insights.overview.dataQualityLabel} tone={insights.overview.dataQualityScore >= 75 ? "green" : insights.overview.dataQualityScore >= 50 ? "yellow" : "red"} />
+      </div>
+    </Card>
+
+    <Card eyebrow="Performance Domains" title="What is trending up or down?">
+      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">{insights.domains.map((domain) => <div key={domain.label} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">{domain.label}</p><p className={classNames("mt-2 text-2xl font-black", insightTone(domain.tone) === "green" ? "text-emerald-300" : insightTone(domain.tone) === "yellow" ? "text-amber-300" : insightTone(domain.tone) === "red" ? "text-red-300" : "text-white")}>{domain.status}</p><p className="mt-1 text-sm text-zinc-300">Score: {domain.scoreLabel}</p><p className="mt-2 text-xs text-zinc-400">Trend: {domain.trend}</p><p className="mt-2 text-xs text-zinc-500">{domain.explanation}</p></div>)}</div>
+    </Card>
+
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Card eyebrow="Primary Opportunity" title={insights.primaryOpportunity.title}><p className="text-sm leading-6 text-zinc-300">{insights.primaryOpportunity.explanation}</p></Card>
+      <Card eyebrow="Primary Risk" title={insights.primaryRisk.title}><p className="text-sm leading-6 text-zinc-300">{insights.primaryRisk.explanation}</p></Card>
+    </div>
+
+    <Card eyebrow="Goal Tracking" title="Which goal is most at risk?">
+      <div className="grid gap-3 md:grid-cols-4">{insights.goalTracking.map((goal) => <Stat key={goal.label} label={goal.label} value={goal.status} sub={`Confidence: ${goal.confidence}`} tone={insightTone(goal.tone)} />)}</div>
+    </Card>
+
+    <Card eyebrow="Weekly Decision" title="What should I focus on next week?">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Stat label="Training progression" value={insights.weeklyDecision.weeklyDecision} tone={insights.weeklyDecision.weeklyDecision === "Progress" ? "green" : insights.weeklyDecision.weeklyDecision === "Recovery Focus" || insights.weeklyDecision.weeklyDecision === "Deload" ? "red" : "yellow"} />
+        <Stat label="Nutrition decision" value={insights.weeklyDecision.nutritionDecision} />
+        <Stat label="Decision confidence" value={insights.weeklyDecision.confidence} sub={`Data quality: ${insights.weeklyDecision.dataQualityScore}/100`} />
+      </div>
+      {insights.weeklyDecision.reasons.length ? <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-zinc-300">{insights.weeklyDecision.reasons.slice(0, 3).map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}
+    </Card>
+
+    <Card eyebrow="Audit Snapshot" title="Latest engine audit entries">
+      <div className="grid gap-2">{insights.auditSnapshot.map((entry) => <div key={entry.id} className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-sm font-black text-white">{entry.domain}: {entry.decision} · {entry.score}/100</p><p className="mt-1 text-xs text-zinc-400">{entry.reason}</p><p className="mt-1 text-[11px] uppercase tracking-[0.16em] text-zinc-600">Confidence: {entry.confidence}</p></div>)}</div>
+    </Card>
+
+    <Card eyebrow="Trend Cards" title="Simple trend snapshot">
+      <div className="grid gap-3 md:grid-cols-4">{insights.trendCards.map((card) => <Stat key={card.label} label={card.label} value={card.status} sub={card.summary} tone={insightTone(card.tone)} />)}</div>
+    </Card>
+
+    <Card eyebrow="Coach Summary" title="Progress insight"><p className="text-base leading-7 text-zinc-200">{insights.coachSummary}</p></Card>
+
     {section === "weight" && <WeightTrendDashboardCard dashboard={weightDashboard} />}
     {section === "run" && <RunProgress trends={runTrends} />}
     {section === "review" && <WeeklyReviewPanel review={weeklyReview} state={state} />}
     {section === "photos" && <ProgressPhotos state={state} updateState={updateState} />}
-    {section === "race" && <Card eyebrow="Race Countdown" title="Half marathon countdown"><Stat label="Days until race" value={raceDays} sub="January 17" tone="yellow" /></Card>}
+    {section === "race" && <RaceCalendarPanel model={raceCalendar} settings={raceSettings} onSaveSettings={(form) => updateState(saveRaceCalendarSettings(state, form))} />}
     {section === "adherence" && <Card eyebrow="Adherence Metrics" title="Execution consistency"><div className="grid gap-3 sm:grid-cols-3"><Stat label="Training adherence" value={`${weeklyReview?.adherenceScore ?? 0}/100`} tone={(weeklyReview?.adherenceScore ?? 0) >= 80 ? "green" : "yellow"} /><Stat label="Weekly miles" value={`${weeklyReview?.totalWeeklyMiles ?? 0} mi`} /><Stat label="Lifts completed" value={weeklyReview?.liftsCompleted ?? 0} /></div></Card>}
+    {section === "goals" && <Card eyebrow="Goal Status" title="Goal tracking engine results"><div className="grid gap-3 md:grid-cols-4">{insights.goalTracking.map((goal) => <Stat key={goal.label} label={goal.label} value={goal.status} sub={`Confidence: ${goal.confidence}`} tone={insightTone(goal.tone)} />)}</div></Card>}
+    {section === "performance" && <Card eyebrow="Performance" title="Performance Snapshot"><div className="grid gap-3 sm:grid-cols-4"><Stat label="Overall Performance Score" value={insights.overview.scoreLabel} tone={insightTone(insights.overview.tone)} /><Stat label="Status" value={insights.overview.status} tone={insightTone(insights.overview.tone)} /><Stat label="Confidence" value={insights.overview.confidence} /><Stat label="Data quality" value={insights.overview.dataQualityLabel} /></div></Card>}
+    {section === "physique" && <Card eyebrow="Physique" title="Physique Snapshot"><p className="text-sm text-zinc-300">Physique data is summarized from the existing Physique Engine in Mission Control. Use Body Metrics and Progress Photos to improve this signal.</p></Card>}
+    {section === "recovery" && <Card eyebrow="Recovery" title="Recovery Signal"><p className="text-sm text-zinc-300">Data not available yet.</p></Card>}
+    {section === "nutrition" && <Card eyebrow="Nutrition" title="Nutrition Decision"><div className="grid gap-3 sm:grid-cols-2"><Stat label="Nutrition decision" value={insights.weeklyDecision.nutritionDecision} /><Stat label="Decision confidence" value={insights.weeklyDecision.confidence} /></div></Card>}
+    {section === "strength" && <Card eyebrow="Strength" title="Strength Trend"><p className="text-sm text-zinc-300">Data not available yet.</p></Card>}
+    {section === "coachSummary" && <Card eyebrow="Coach Summary" title="Progress insight"><p className="text-base leading-7 text-zinc-200">{insights.coachSummary}</p></Card>}
+    {section === "missing" && <Card eyebrow="Mission Control" title="Data not available yet."><p className="text-sm text-zinc-300">Data not available yet.</p></Card>}
+  </div>;
+}
+
+function RaceCalendarPanel({ model, settings, onSaveSettings }: { model: RaceCalendarUiModel; settings: RaceCalendarSettingsModel; onSaveSettings: (form: RaceCalendarSettingsForm) => void }) {
+  const [form, setForm] = useState<RaceCalendarSettingsForm>(settings.form);
+  const updateForm = (field: keyof RaceCalendarSettingsForm, value: string | number) => setForm((current) => ({ ...current, [field]: value }));
+  const submitSettings = () => onSaveSettings(form);
+  return <div className="grid gap-4">
+    <Card eyebrow="Race Settings" title="Personalize calendar planning">
+      {!settings.hasSettings && <div className="mb-4"><EmptyState title="Missing race settings" copy={settings.emptyState} /></div>}
+      <div className="grid gap-3 md:grid-cols-5">
+        <Field label="Race date"><input className={inputClass} type="date" value={form.raceDate} onChange={(event) => updateForm("raceDate", event.target.value)} /></Field>
+        <Field label="Race type"><select className={inputClass} value={form.raceType} onChange={(event) => updateForm("raceType", event.target.value as RaceCalendarSettingsForm["raceType"])}><option value="HalfMarathon">Half Marathon</option><option value="Marathon">Marathon</option><option value="10K">10K</option><option value="5K">5K</option><option value="Other">Other</option></select></Field>
+        <Field label="Target pace"><input className={inputClass} type="number" step="0.01" min="1" value={form.targetRacePace} onChange={(event) => updateForm("targetRacePace", Number(event.target.value))} /></Field>
+        <Field label="Longest run"><input className={inputClass} type="number" step="0.1" min="0" value={form.currentLongestRun} onChange={(event) => updateForm("currentLongestRun", Number(event.target.value))} /></Field>
+        <Field label="Weekly mileage"><input className={inputClass} type="number" step="0.1" min="0" value={form.currentWeeklyMileage} onChange={(event) => updateForm("currentWeeklyMileage", Number(event.target.value))} /></Field>
+      </div>
+      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="grid gap-2 sm:grid-cols-5">{settings.summary.map((item) => <p key={item.label} className="rounded-2xl bg-white/[0.03] px-3 py-2 text-xs text-zinc-400"><span className="block font-black uppercase tracking-[0.16em] text-zinc-500">{item.label}</span><span className="text-sm font-bold text-white">{item.value}</span></p>)}</div>
+        <button type="button" onClick={submitSettings} className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-black">Save race settings</button>
+      </div>
+      <p className="mt-4 text-xs text-zinc-500">{settings.caveat}</p>
+    </Card>
+
+    <Card eyebrow="Race Calendar" title="Half marathon countdown">
+      {model.hasLowData && <div className="mb-4"><EmptyState title={model.emptyState.title} copy={model.emptyState.copy} /></div>}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label={model.countdown.label} value={model.countdown.value} sub={model.countdown.sub} tone="yellow" />
+        <Stat label="Current phase" value={model.thisWeek.phase} sub={model.thisWeek.focus} />
+        <Stat label="Current training week" value={model.thisWeek.trainingWeek} />
+        <Stat label={model.readiness.label} value={model.readiness.value} sub={model.readiness.sub} tone={model.readiness.value === "Ahead" || model.readiness.value === "OnTrack" ? "green" : model.readiness.value === "Behind" ? "red" : "yellow"} />
+      </div>
+    </Card>
+
+    <div className="grid gap-4 lg:grid-cols-3">
+      <Card eyebrow="This week" title={model.thisWeek.focus}>
+        <div className="grid gap-3">
+          <Stat label="Target long run" value={model.thisWeek.targetLongRun} />
+          <Stat label="Target weekly mileage" value={model.thisWeek.targetWeeklyMileage} />
+        </div>
+      </Card>
+      <Card eyebrow={model.nextMilestone.label} title={model.nextMilestone.value}>
+        <p className="text-sm leading-6 text-zinc-300">{model.nextMilestone.sub}</p>
+      </Card>
+      <Card eyebrow={model.peakTaper.title} title="Peak and taper targets">
+        <div className="grid gap-3">
+          <Stat label="Next deload week" value={model.peakTaper.nextDeloadWeek} />
+          <Stat label="Expected peak week" value={model.peakTaper.expectedPeakWeek} />
+          <Stat label="Expected peak long run" value={model.peakTaper.expectedPeakLongRun} />
+          <Stat label="Expected peak mileage" value={model.peakTaper.expectedPeakMileage} />
+        </div>
+      </Card>
+    </div>
+
+    <Card eyebrow="Training Roadmap" title="Upcoming calendar weeks preview">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {model.roadmapPreview.map((week) => <div key={week.weekLabel} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">{week.weekLabel}</p><p className="mt-1 text-lg font-black text-white">{week.phase}</p></div>
+            <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-black text-amber-200">{week.mileageTrend}</span>
+          </div>
+          <p className="mt-3 text-sm font-bold text-zinc-200">{week.focus}</p>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400"><p>Long run: <span className="font-bold text-white">{week.targetLongRun}</span></p><p>Mileage: <span className="font-bold text-white">{week.targetWeeklyMileage}</span></p></div>
+        </div>)}
+      </div>
+      <p className="mt-4 text-xs text-zinc-500">Read-only roadmap from Race Calendar Engine V1 and Adaptive Training Calendar Engine V1. Daily workouts and runs are still owned by Train/Training Engine.</p>
+    </Card>
   </div>;
 }
 
@@ -381,41 +812,43 @@ function DailyCheckInForm({ state, updateState }: { state: AppState; updateState
   </div>;
 }
 
-const blankWorkoutExercise = (id: string, name: string): WorkoutLoggerExerciseInput => ({ id, name, sets: 3, reps: 8, weight: 0, rpe: 7, painNotes: "", completed: true });
-
-function WorkoutLogger({ state, updateState, latestCheckIn }: { state: AppState; updateState: (s: AppState) => void; latestCheckIn?: DailyCheckIn }) {
-  const [form, setForm] = useState<WorkoutLoggerInput>({
-    id: uid("manual-workout"),
-    userId: state.user.id,
-    date: todayIso(),
-    workoutType: "upper strength",
-    exercises: [blankWorkoutExercise("manual-ex-1", "Bench Press"), blankWorkoutExercise("manual-ex-2", "Row")],
-    completed: true,
-    sorenessLevel: latestCheckIn?.soreness ?? 4,
-    sleepHours: latestCheckIn?.sleepHours ?? 7,
-  });
-  const set = (field: keyof WorkoutLoggerInput, value: string | number | boolean | WorkoutLoggerExerciseInput[]) => setForm({ ...form, [field]: value });
-  const setExercise = (index: number, field: keyof WorkoutLoggerExerciseInput, value: string | number | boolean) => set("exercises", form.exercises.map((exercise, i) => i === index ? { ...exercise, [field]: value } : exercise));
-  const save = () => updateState(saveWorkoutLoggerEntry(state, buildWorkoutLoggerSession(form), { sorenessLevel: form.sorenessLevel, sleepHours: form.sleepHours }).state);
-  return <Card eyebrow="Workout Logging" title="Log a workout"><div className="grid gap-3 md:grid-cols-2">
-    <Field label="Workout date"><input className={inputClass} type="date" value={form.date} onChange={(e) => set("date", e.target.value)} /></Field>
-    <Field label="Workout type"><select className={inputClass} value={form.workoutType} onChange={(e) => set("workoutType", e.target.value as WorkoutLoggerType)}><option value="upper strength">Upper strength</option><option value="lower strength">Lower strength</option><option value="Greek god hypertrophy">Greek god hypertrophy</option><option value="recovery">Recovery</option></select></Field>
-    <Field label="Sleep hours"><input className={inputClass} type="number" step="0.1" value={form.sleepHours} onChange={(e) => set("sleepHours", Number(e.target.value))} /></Field>
-    <Field label="Soreness 1-10"><input className={inputClass} type="number" min="1" max="10" value={form.sorenessLevel} onChange={(e) => set("sorenessLevel", Number(e.target.value))} /></Field>
-    <Field label="Completed"><select className={inputClass} value={String(form.completed)} onChange={(e) => set("completed", e.target.value === "true")}><option value="true">Yes</option><option value="false">No</option></select></Field>
-  </div><div className="mt-4 grid gap-3">{form.exercises.map((exercise, index) => <div key={exercise.id} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="mb-3 font-bold text-white">Exercise {index + 1}</p><div className="grid gap-3 md:grid-cols-3"><Field label="Exercise"><input className={inputClass} value={exercise.name} onChange={(e) => setExercise(index, "name", e.target.value)} /></Field><Field label="Sets"><input className={inputClass} type="number" min="0" value={exercise.sets} onChange={(e) => setExercise(index, "sets", Number(e.target.value))} /></Field><Field label="Reps"><input className={inputClass} type="number" min="0" value={exercise.reps} onChange={(e) => setExercise(index, "reps", Number(e.target.value))} /></Field><Field label="Weight"><input className={inputClass} type="number" min="0" value={exercise.weight} onChange={(e) => setExercise(index, "weight", Number(e.target.value))} /></Field><Field label="RPE"><input className={inputClass} type="number" min="1" max="10" value={exercise.rpe} onChange={(e) => setExercise(index, "rpe", Number(e.target.value))} /></Field><Field label="Exercise completed"><select className={inputClass} value={String(exercise.completed)} onChange={(e) => setExercise(index, "completed", e.target.value === "true")}><option value="true">Yes</option><option value="false">No</option></select></Field><label className="grid gap-1 text-sm text-zinc-300 md:col-span-3">Pain notes<textarea className={inputClass} value={exercise.painNotes} onChange={(e) => setExercise(index, "painNotes", e.target.value)} /></label></div></div>)}</div><button onClick={save} className="mt-5 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save workout log</button></Card>;
-}
-
-function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance }: { state: AppState; updateState: (s: AppState) => void; selectedWeek: number; setSelectedWeek: (n: number) => void; selectedDay: number; setSelectedDay: (n: number) => void; readiness: any; workout: any; originalWorkout: any; latestCheckIn?: DailyCheckIn; runningRecommendation?: any; plannedRunDistance: number }) {
+function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance, trainingEngineResult: providedTrainingEngineResult }: { state: AppState; updateState: (s: AppState) => void; selectedWeek: number; setSelectedWeek: (n: number) => void; selectedDay: number; setSelectedDay: (n: number) => void; readiness: any; workout: any; originalWorkout: any; latestCheckIn?: DailyCheckIn; runningRecommendation?: any; plannedRunDistance: number; trainingEngineResult: TrainingEngineResult }) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const displayedWorkout = workout;
   const tone = readiness.status === "Green" ? "green" : readiness.status === "Yellow" ? "yellow" : "red";
+  const plannedRun = runningRecommendation?.recommendedDistance ?? plannedRunDistance;
+  const trainingEngineResult = providedTrainingEngineResult ?? evaluateTraining({
+    currentDate: todayIso(),
+    trainingPlan: null,
+    selectedWeek,
+    selectedDay,
+    readinessResult: readiness,
+    progressionResult: { weeklyDecision: "Repeat", nutritionDecision: "Maintain Calories", goalStatus: { "Fat Loss": "At Risk", Physique: "At Risk", Strength: "At Risk", "Half Marathon": "At Risk" }, confidence: "Low", dataQuality: { score: 40, confidence: "Low", missingInputs: ["progressionResult"], penalties: [], warnings: ["Need canonical progression output"] }, reasons: [], warnings: [], auditEntries: [] } as any,
+    goalTrackingResult: { overallStatus: "Insufficient Data", confidence: "Low", dataQualityScore: 40, warnings: ["Need goal tracking output"], priorityGoal: "half_marathon", recommendations: [] } as any,
+    scheduledWorkout: displayedWorkout,
+    scheduledRun: plannedRun > 0 ? { type: originalWorkout.longRunMiles ? "long" : "easy", title: `${plannedRun} mi planned`, distanceMiles: plannedRun } : null,
+    availableMinutes: 90,
+    userPreferences: { includeWarmup: true, includeCooldown: true },
+  });
+  const trainBlocks = trainingEngineResult.todayPlan;
+  const liftScheduled = Boolean(trainingEngineResult.workout);
+  const runScheduled = Boolean(trainingEngineResult.run);
   const activeSession = (activeSessionId ? state.workoutSessions.find((session) => session.id === activeSessionId) : null)
     ?? [...state.workoutSessions].reverse().find((session) => session.workoutId === displayedWorkout.id && session.status === "active");
   const workoutNote = useDataConfidence(state, "workout");
   const runningNote = useDataConfidence(state, "running");
+  const today = todayIso();
+  const liftCompleted = liftScheduled ? state.workoutSessions.some((session) => session.workoutId === displayedWorkout.id && session.status === "completed" && (session.startedAt.slice(0, 10) === today || session.endedAt?.slice(0, 10) === today)) : null;
+  const todayRun = runScheduled ? state.runLogs.find((run) => run.date === today && run.completed) : null;
+  const runCompleted = runScheduled ? Boolean(todayRun) : null;
+  const majorWarnings = [
+    ...trainingEngineResult.warnings.map((warning) => warning.message),
+    ...(latestCheckIn?.pain ? [`Pain flag: ${latestCheckIn.painLocation || "unspecified"} ${latestCheckIn.painSeverity}/10. Keep training pain-free.`] : []),
+    ...(runningRecommendation?.warnings ?? []),
+  ];
 
   const startWorkout = () => {
+    if (!liftScheduled) return;
     const now = new Date().toISOString();
     const session: WorkoutSession = {
       id: uid("session"),
@@ -439,11 +872,35 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
   }
 
   return <section className="rounded-3xl border border-white/10 bg-zinc-950/80 p-4 shadow-2xl shadow-black/30">
-    <div className="grid gap-3 lg:grid-cols-2">
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-amber-300">Today’s workout</p><h3 className="mt-2 text-xl font-black text-white">{displayedWorkout.title}</h3><div className="mt-3 grid gap-2">{displayedWorkout.exercises.length ? displayedWorkout.exercises.map((exercise: Exercise) => <p key={exercise.id} className="rounded-xl bg-black/20 p-3 text-sm text-zinc-300"><b className="text-white">{exercise.order}. {exercise.name}</b> · {exercise.prescribedSets} x {exercise.prescribedReps} · RPE ≤{exercise.prescribedRpe ?? 8}</p>) : <p className="text-red-200">Recovery replacement: walk, mobility, hydration, sleep, or full rest.</p>}</div><div className="mt-3"><DataConfidenceNotice note={workoutNote} /></div></div>
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-sky-300">Today’s run</p><h3 className="mt-2 text-xl font-black text-white">{runningRecommendation ? `${runningRecommendation.action}: ${runningRecommendation.recommendedDistance} mi` : `${plannedRunDistance} mi planned`}</h3><p className="mt-2 text-sm text-zinc-400">{runningRecommendation?.message ?? originalWorkout.notes ?? "Run stays conversational unless today’s workout says otherwise."}</p>{latestCheckIn?.pain ? <p className="mt-3 rounded-xl bg-red-950/40 p-3 text-sm text-red-200">Pain flag: keep training pain-free.</p> : null}<div className="mt-3"><DataConfidenceNotice note={runningNote} /></div></div>
+    <div className="mb-4 rounded-2xl border border-amber-300/20 bg-amber-400/10 p-4">
+      <p className="text-xs uppercase tracking-[0.25em] text-amber-300/80">Train</p>
+      <h2 className="mt-1 text-2xl font-black text-white">Today’s complete training session</h2>
+      <p className="mt-2 text-sm text-zinc-300">Train is now the only place to execute/log workouts and runs. Follow the blocks in order.</p>
+      <div className="mt-3 grid gap-2 md:grid-cols-5">{trainBlocks.map((block, index) => <div key={`${block.kind}-${index}`} className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">{index + 1}. {block.kind}</p><p className="mt-1 text-sm font-black text-white">{block.title}</p><p className="mt-1 text-xs text-zinc-400">{block.description}</p></div>)}</div>
     </div>
-    <button onClick={startWorkout} className="mt-3 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Start Training</button>
+
+    <div className="grid gap-3 lg:grid-cols-2">
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-amber-300">Lift / workout block</p><h3 className="mt-2 text-xl font-black text-white">{trainingEngineResult.workout?.title ?? "No lift scheduled"}</h3><div className="mt-3 grid gap-2">{trainingEngineResult.workout ? trainingEngineResult.workout.items.map((item) => <p key={item} className="rounded-xl bg-black/20 p-3 text-sm text-zinc-300">{item}</p>) : <p className="text-zinc-400">Skip directly from warm-up to run or cooldown.</p>}</div><div className="mt-3"><DataConfidenceNotice note={workoutNote} /></div>{liftScheduled && <button onClick={startWorkout} className="mt-3 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Start Lift / Workout</button>}</div>
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-sky-300">Run block</p><h3 className="mt-2 text-xl font-black text-white">{trainingEngineResult.run?.title ?? "No run scheduled"}</h3><p className="mt-2 text-sm text-zinc-400">{trainingEngineResult.run?.description ?? "No run logging needed today."}</p>{latestCheckIn?.pain ? <p className="mt-3 rounded-xl bg-red-950/40 p-3 text-sm text-red-200">Pain flag: keep training pain-free.</p> : null}<div className="mt-3"><DataConfidenceNotice note={runningNote} /></div></div>
+    </div>
+
+    <div className="mt-4 grid gap-3 lg:grid-cols-2">
+      <SessionInstructionBlock title="Warm-up" items={trainingEngineResult.warmup?.items ?? []} />
+      <SessionInstructionBlock title="Cooldown" items={trainingEngineResult.cooldown?.items ?? []} />
+    </div>
+
+    {runScheduled && <div className="mt-4"><TrainRunLogger state={state} updateState={updateState} plannedDistance={plannedRun} runType={displayedWorkout.longRunMiles ? "long run" : "easy"} existingRun={todayRun ?? undefined} /></div>}
+
+    <Card className="mt-4" eyebrow="Session Summary" title="Training day status">
+      <div className="grid gap-3 sm:grid-cols-4">
+        <Stat label="Lift completed" value={liftCompleted === null ? "Not scheduled" : liftCompleted ? "Yes" : "No"} tone={liftCompleted === null ? "neutral" : liftCompleted ? "green" : "yellow"} />
+        <Stat label="Run completed" value={runCompleted === null ? "Not scheduled" : runCompleted ? "Yes" : "No"} tone={runCompleted === null ? "neutral" : runCompleted ? "green" : "yellow"} />
+        <Stat label="Readiness used" value={`${readiness.status} — ${readiness.score}`} sub={readiness.reason} tone={tone} />
+        <Stat label="Next action" value={liftScheduled && !liftCompleted ? "Start lift" : runScheduled && !runCompleted ? "Log run" : "Cooldown + recover"} />
+      </div>
+      {majorWarnings.length ? <div className="mt-4 rounded-2xl border border-red-300/20 bg-red-950/30 p-4 text-sm text-red-100"><p className="font-black">Major warnings</p><ul className="mt-2 list-disc space-y-1 pl-5">{majorWarnings.map((warning: string) => <li key={warning}>{warning}</li>)}</ul></div> : <p className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-4 text-sm text-emerald-100">No major training warnings from today’s readiness/run recommendation.</p>}
+    </Card>
+
     <div className="mt-3 grid gap-3 md:grid-cols-3">
       <Field label="Week"><select className={inputClass} value={selectedWeek} onChange={(e) => setSelectedWeek(Number(e.target.value))}>{Array.from({ length: 12 }, (_, i) => <option key={i+1} value={i+1}>Week {i+1}</option>)}</select></Field>
       <Field label="Day"><select className={inputClass} value={selectedDay} onChange={(e) => setSelectedDay(Number(e.target.value))}>{["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"].map((d, i) => <option key={d} value={i}>{d}</option>)}</select></Field>
@@ -610,35 +1067,48 @@ function ActiveWorkout({ state, updateState, session, workout, readinessStatus, 
 }
 
 
-function Running({ state, updateState, plannedDistance }: { state: AppState; updateState: (s: AppState) => void; plannedDistance: number }) {
-  const [form, setForm] = useState<RunLoggerInput>({
-    id: uid("run"),
+function SessionInstructionBlock({ title, items }: { title: string; items: string[] }) {
+  return <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><h3 className="font-black text-white">{title}</h3><ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-zinc-300">{items.map((item) => <li key={item}>{item}</li>)}</ul></div>;
+}
+
+function TrainRunLogger({ state, updateState, plannedDistance, runType, existingRun }: { state: AppState; updateState: (s: AppState) => void; plannedDistance: number; runType: RunType; existingRun?: AppState["runLogs"][number] }) {
+  const [form, setForm] = useState<TrainRunLogInput>({
+    id: existingRun?.id ?? uid("run"),
     userId: state.user.id,
-    date: todayIso(),
-    runType: "easy",
-    distance: plannedDistance,
-    durationMinutes: Math.round(plannedDistance * 11),
-    averagePace: 11,
-    averageHeartRate: 140,
-    rpe: 5,
-    walkBreaks: false,
-    painScore: 0,
-    notes: "",
+    date: existingRun?.date ?? todayIso(),
+    runType: existingRun?.runType ?? runType,
+    plannedDistance: existingRun?.plannedDistance ?? plannedDistance,
+    actualDistance: existingRun?.actualDistance ?? plannedDistance,
+    durationMinutes: existingRun?.durationMinutes ?? Math.round(plannedDistance * 11),
+    averagePace: existingRun?.averagePace ?? 11,
+    averageHeartRate: existingRun?.averageHr ?? 140,
+    rpe: existingRun?.rpe ?? 5,
+    pain: existingRun?.pain ?? false,
+    painScore: existingRun?.painScore ?? 0,
+    notes: existingRun?.notes ?? "",
+    walkBreaks: existingRun?.walkBreaks ?? false,
   });
-  const set = (field: keyof RunLoggerInput, value: string | number | boolean) => setForm({ ...form, [field]: value });
-  const save = () => updateState(saveRunLoggerEntry(state, buildRunLoggerRecord(form)).state);
-  return <Card eyebrow="Run Logging" title="Log a run"><div className="grid gap-3 md:grid-cols-2">
+  const [result, setResult] = useState<string | null>(null);
+  const set = (field: keyof TrainRunLogInput, value: string | number | boolean) => setForm({ ...form, [field]: value });
+  const save = () => {
+    const saved = saveTrainRunLog(state, form);
+    updateState(saved.state);
+    setResult(saved.result.summary);
+  };
+  return <Card eyebrow="Train Run Execution" title="Log today’s run"><div className="grid gap-3 md:grid-cols-2">
     <Field label="Date"><input className={inputClass} type="date" value={form.date} onChange={(e) => set("date", e.target.value)} /></Field>
     <Field label="Run type"><select className={inputClass} value={form.runType} onChange={(e) => set("runType", e.target.value as RunType)}><option value="easy">Easy</option><option value="speed">Speed</option><option value="tempo">Tempo</option><option value="long run">Long run</option><option value="race">Race</option></select></Field>
-    <Field label="Distance"><input className={inputClass} type="number" step="0.1" min="0" value={form.distance} onChange={(e) => set("distance", Number(e.target.value))} /></Field>
+    <Field label="Planned distance"><input className={inputClass} type="number" step="0.1" min="0" value={form.plannedDistance} onChange={(e) => set("plannedDistance", Number(e.target.value))} /></Field>
+    <Field label="Actual distance"><input className={inputClass} type="number" step="0.1" min="0" value={form.actualDistance} onChange={(e) => set("actualDistance", Number(e.target.value))} /></Field>
     <Field label="Duration"><input className={inputClass} type="number" step="1" min="0" value={form.durationMinutes} onChange={(e) => set("durationMinutes", Number(e.target.value))} /></Field>
     <Field label="Average pace"><input className={inputClass} type="number" step="0.1" min="0" value={form.averagePace ?? ""} onChange={(e) => set("averagePace", Number(e.target.value))} /></Field>
     <Field label="Average heart rate"><input className={inputClass} type="number" min="0" value={form.averageHeartRate} onChange={(e) => set("averageHeartRate", Number(e.target.value))} /></Field>
     <Field label="RPE 1-10"><input className={inputClass} type="number" min="1" max="10" value={form.rpe} onChange={(e) => set("rpe", Number(e.target.value))} /></Field>
-    <Field label="Walk breaks"><select className={inputClass} value={String(form.walkBreaks)} onChange={(e) => set("walkBreaks", e.target.value === "true")}><option value="false">No</option><option value="true">Yes</option></select></Field>
-    <Field label="Pain score 0-10"><input className={inputClass} type="number" min="0" max="10" value={form.painScore} onChange={(e) => set("painScore", Number(e.target.value))} /></Field>
+    <Field label="Pain"><select className={inputClass} value={String(form.pain)} onChange={(e) => set("pain", e.target.value === "true")}><option value="false">No</option><option value="true">Yes</option></select></Field>
+    <Field label="Pain score 0-10"><input className={inputClass} type="number" min="0" max="10" value={form.painScore ?? 0} onChange={(e) => set("painScore", Number(e.target.value))} /></Field>
+    <Field label="Walk breaks"><select className={inputClass} value={String(form.walkBreaks ?? false)} onChange={(e) => set("walkBreaks", e.target.value === "true")}><option value="false">No</option><option value="true">Yes</option></select></Field>
     <label className="grid gap-1 text-sm text-zinc-300 md:col-span-2">Notes<textarea className={inputClass} value={form.notes} onChange={(e) => set("notes", e.target.value)} /></label>
-  </div><button onClick={save} className="mt-5 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save run log</button></Card>;
+  </div><button onClick={save} className="mt-5 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save run from Train</button>{result ? <p className="mt-3 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-3 text-sm text-emerald-100">{result}</p> : null}</Card>;
 }
 
 function RunProgress({ trends }: { trends: ReturnType<typeof calculateRunTrends> }) {
@@ -783,15 +1253,40 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
 }
 
 function BodyMetrics({ state, updateState, trend }: any) {
-  const [metric, setMetric] = useState<any>({ id: uid("metric"), userId: state.user.id, date: todayIso(), weight: trend.current7DayAverage || state.user.startingWeight, waist: 37.5, chest: 43, arms: 16, thighs: 24, hips: 40, notes: "" });
+  const summary = buildBodyMetricsSummary(state.bodyMetrics ?? []);
+  const [metric, setMetric] = useState<any>({ id: uid("metric"), userId: state.user.id, date: todayIso(), weight: trend.current7DayAverage || state.user.startingWeight, waist: 37.5, neck: 16, hips: 40, chest: 43, arms: 16, thighs: 24, notes: "" });
   const save = () => updateState({ ...state, bodyMetrics: [...state.bodyMetrics.filter((m: any) => m.date !== metric.date), metric] });
-  return <Card eyebrow="Body Metrics Logging" title="Measurements"><div className="grid gap-3 md:grid-cols-2">{Object.keys(metric).filter((k) => !["id","userId"].includes(k)).map((field) => <Field key={field} label={field}><input className={inputClass} type={field === "date" ? "date" : field === "notes" ? "text" : "number"} value={metric[field]} onChange={(e) => setMetric({ ...metric, [field]: e.target.type === "number" ? Number(e.target.value) : e.target.value })} /></Field>)}</div><button onClick={save} className="mt-5 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save measurements</button></Card>;
+  const value = (number: number | null, suffix = "") => number === null ? "—" : `${number}${suffix}`;
+  const change = (number: number | null, suffix = "") => number === null ? "Need more measurements" : `${number > 0 ? "+" : ""}${number}${suffix}`;
+  const fields = ["date", "weight", "waist", "neck", "hips", "chest", "arms", "thighs", "notes"];
+  return <div className="grid gap-4">
+    <Card eyebrow="Body Metrics Summary" title="Measurement trend">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Stat label="Current weight" value={value(summary.currentWeight, " lb")} sub={summary.message} />
+        <Stat label="Weight change 7 days" value={change(summary.weightChange7Days, " lb")} tone={summary.weightChange7Days !== null && summary.weightChange7Days <= 0 ? "green" : "yellow"} />
+        <Stat label="Waist change 7 days" value={change(summary.waistChange7Days, " in")} tone={summary.waistChange7Days !== null && summary.waistChange7Days <= 0 ? "green" : "yellow"} />
+      </div>
+    </Card>
+    <Card eyebrow="Body Metrics" title="Weekly measurements"><div className="grid gap-3 md:grid-cols-2">{fields.map((field) => <Field key={field} label={field}><input className={inputClass} type={field === "date" ? "date" : field === "notes" ? "text" : "number"} value={metric[field] ?? ""} onChange={(e) => setMetric({ ...metric, [field]: e.target.type === "number" ? Number(e.target.value) : e.target.value })} /></Field>)}</div><button onClick={save} className="mt-5 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save measurements</button></Card>
+  </div>;
 }
 
 function ProgressPhotos({ state, updateState }: { state: AppState; updateState: (s: AppState) => void }) {
+  const summary = buildPhotoSectionSummary(state.photos ?? []);
   const [photo, setPhoto] = useState<ProgressPhoto>({ id: uid("photo"), userId: state.user.id, date: todayIso(), frontPhotoUrl: "", sidePhotoUrl: "", backPhotoUrl: "", notes: "" });
   const save = () => updateState({ ...state, photos: [...state.photos, photo] });
-  return <Card eyebrow="Weekly comparison" title="Progress photos"><p className="mb-4 text-sm text-zinc-400">For this MVP, paste local/object-storage URLs. The Supabase schema includes photo URL fields so storage buckets can be wired in later.</p><div className="grid gap-3 md:grid-cols-2">{["date","frontPhotoUrl","sidePhotoUrl","backPhotoUrl","notes"].map((field) => <Field key={field} label={field}><input className={inputClass} type={field === "date" ? "date" : "text"} value={(photo as any)[field] ?? ""} onChange={(e) => setPhoto({ ...photo, [field]: e.target.value })} /></Field>)}</div><button onClick={save} className="mt-5 rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save photo record</button><div className="mt-5 grid gap-3 md:grid-cols-3">{state.photos.map((p) => <div key={p.id} className="rounded-2xl bg-white/[0.03] p-3 text-sm text-zinc-400"><b className="text-white">{p.date}</b><br />Front: {p.frontPhotoUrl || "—"}<br />Side: {p.sidePhotoUrl || "—"}<br />Back: {p.backPhotoUrl || "—"}</div>)}</div></Card>;
+  const photoFields = [
+    ["frontPhotoUrl", "Front"],
+    ["sidePhotoUrl", "Side"],
+    ["backPhotoUrl", "Back"],
+  ] as const;
+  return <Card eyebrow="Progress Photos" title="Front / Side / Back">
+    <p className="mb-4 text-sm text-zinc-400">Upload or paste saved-picture references for the three standard angles. Latest upload date: <span className="font-bold text-white">{summary.latestUploadDate ?? "No photos yet"}</span>.</p>
+    <div className="grid gap-3 md:grid-cols-3">{summary.slots.map((slot) => <div key={slot.field} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p className="text-sm font-black text-white">{slot.label}</p><p className="mt-1 break-all text-xs text-zinc-400">Latest: {slot.latestUrl ?? "—"}</p></div>)}</div>
+    <div className="mt-4 grid gap-3 md:grid-cols-2"><Field label="date"><input className={inputClass} type="date" value={photo.date} onChange={(e) => setPhoto({ ...photo, date: e.target.value })} /></Field>{photoFields.map(([field, label]) => <Field key={field} label={`${label} photo`}><input className={inputClass} type="text" placeholder={`${label} saved picture reference`} value={(photo as any)[field] ?? ""} onChange={(e) => setPhoto({ ...photo, [field]: e.target.value })} /></Field>)}<Field label="notes"><input className={inputClass} type="text" value={photo.notes ?? ""} onChange={(e) => setPhoto({ ...photo, notes: e.target.value })} /></Field></div>
+    <button onClick={save} className="mt-5 rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Save photo record</button>
+    <div className="mt-5 grid gap-3 md:grid-cols-3">{state.photos.map((p) => <div key={p.id} className="rounded-2xl bg-white/[0.03] p-3 text-sm text-zinc-400"><b className="text-white">{p.date}</b><br />Front: {p.frontPhotoUrl || "—"}<br />Side: {p.sidePhotoUrl || "—"}<br />Back: {p.backPhotoUrl || "—"}</div>)}</div>
+  </Card>;
 }
 
 function WeeklyReviewPanel({ review, state }: { review: ReturnType<typeof buildWeeklyReviewSummary> | null; state: AppState }) {
@@ -825,11 +1320,61 @@ function WeeklyReviewPanel({ review, state }: { review: ReturnType<typeof buildW
 }
 
 function Settings({ state, updateState }: { state: AppState; updateState: (s: AppState) => void }) {
-  return <Card eyebrow="Settings" title="Settings and Integrations">
+  const [lastBackupDate, setLastBackupDate] = useState<string | null>(() => typeof window === "undefined" ? null : window.localStorage.getItem(LAST_BACKUP_DATE_KEY));
+  const [importValidation, setImportValidation] = useState<BackupValidationResult | null>(null);
+  const [importStatus, setImportStatus] = useState("Select a backup JSON file to validate it before restore.");
+  const dashboard = buildBackupDashboardModel(state, lastBackupDate);
+  const healthTone = dashboard.health.status === "GREEN" ? "text-emerald-300" : dashboard.health.status === "YELLOW" ? "text-amber-300" : "text-red-300";
+
+  const exportBackup = () => {
+    downloadAppStateBackup(state);
+    const exportedAt = new Date().toISOString();
+    if (typeof window !== "undefined") window.localStorage.setItem(LAST_BACKUP_DATE_KEY, exportedAt);
+    setLastBackupDate(exportedAt);
+    setImportStatus("Backup exported. Keep the JSON somewhere safe outside this browser.");
+  };
+
+  const importBackup = async (file: File | undefined) => {
+    if (!file) return;
+    const text = await file.text();
+    const validation = parseAndValidateBackupJson(text);
+    setImportValidation(validation);
+    setImportStatus(`${validation.status}: ${validation.messages.join(" ")}`);
+  };
+
+  const confirmRestore = () => {
+    if (!importValidation?.payload || importValidation.status === "INVALID") return;
+    const restore = restoreBackupPayload(importValidation.payload, { persist: true });
+    if (restore.status !== "restored") {
+      setImportStatus(`Restore failed: ${restore.messages.join(" ")}`);
+      return;
+    }
+    updateState(restore.state);
+    setImportStatus(`Restore complete. Verified workouts ${restore.restoredCounts.workouts}, runs ${restore.restoredCounts.runs}, meals ${restore.restoredCounts.meals}, body metrics ${restore.restoredCounts.bodyMetrics}, photos ${restore.restoredCounts.photos}.`);
+  };
+
+  return <Card eyebrow="More" title="Settings and Integrations">
     <div className="mb-4 rounded-3xl border border-amber-300/25 bg-amber-300/10 p-4">
-      <p className="font-black text-white">Local data backup</p>
-      <p className="mt-1 text-sm text-zinc-300">Download a full AppState JSON backup before manual self-testing. This protects the current localStorage data if testing gets messy.</p>
-      <button type="button" onClick={() => downloadAppStateBackup(state)} className="mt-3 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Export full AppState JSON</button>
+      <p className="text-xs font-black uppercase tracking-[0.25em] text-amber-200">Data Protection</p>
+      <h3 className="mt-1 text-xl font-black text-white">Backup / Restore</h3>
+      <div className="mt-4 grid gap-3 md:grid-cols-5">
+        <Stat label="Backup Status" value={dashboard.health.status} sub={dashboard.backupStatus} tone={dashboard.health.status === "GREEN" ? "green" : dashboard.health.status === "YELLOW" ? "yellow" : "red"} />
+        <Stat label="Last Backup Date" value={dashboard.lastBackupDate ? dashboard.lastBackupDate.slice(0, 10) : "Never"} />
+        <Stat label="Schema Version" value={dashboard.schemaVersion} />
+        <Stat label="Runs" value={dashboard.counts.runs} />
+        <Stat label="Workouts" value={dashboard.counts.workouts} />
+      </div>
+      <p className={`mt-3 text-sm font-bold ${healthTone}`}>{dashboard.health.message}</p>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <button type="button" onClick={exportBackup} className="rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Export Backup</button>
+        <Field label="Import Backup"><input className={inputClass} type="file" accept="application/json,.json" onChange={(event) => void importBackup(event.target.files?.[0])} /></Field>
+      </div>
+      <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4 text-sm text-zinc-300">
+        <p className="font-black text-white">Validation / preview</p>
+        <p className="mt-1">{importStatus}</p>
+        {importValidation?.summary && <p className="mt-2 text-xs text-zinc-400">Preview: workouts {importValidation.summary.workouts} · runs {importValidation.summary.runs} · meals {importValidation.summary.meals} · body metrics {importValidation.summary.bodyMetrics} · photos {importValidation.summary.photos}</p>}
+        <button type="button" disabled={!importValidation?.payload || importValidation.status === "INVALID"} onClick={confirmRestore} className="mt-3 rounded-2xl bg-emerald-400 px-4 py-3 font-black text-black disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">Confirm Restore</button>
+      </div>
     </div>
     <div className="grid gap-3 md:grid-cols-2"><Field label="Preferred units"><select className={inputClass} value={state.user.preferredUnits} onChange={(e) => updateState({ ...state, user: { ...state.user, preferredUnits: e.target.value as any } })}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></Field><Field label="Notifications"><input className={inputClass} value="Morning check-in, weekly photos, long-run reminder" readOnly /></Field><Field label="Future Apple Health fields"><textarea className={inputClass} readOnly value="Steps, active calories, resting HR, HRV, sleep duration/stages, VO2 max, workout HR zones, running pace, recovery HR, cardio fitness trend" /></Field><Field label="Database mode"><textarea className={inputClass} readOnly value="MVP persists to localStorage now. Supabase/Postgres schema and seed SQL are included under supabase/ for production wiring." /></Field></div>
   </Card>;

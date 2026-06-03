@@ -1,6 +1,7 @@
 import type { AppState, BodyMetric, DailyCheckIn, NutritionLog, RunLog, WorkoutSession } from "./types";
 import { evaluateReadiness, readinessInputFromWeeklyWindow, type ReadinessEngineResult } from "./readiness-engine";
 import { evaluateRunning, type RunningEngineInput, type RunningEngineResult, type RunningProgressionAction } from "./running-engine";
+import { evaluateProgression, type ProgressionEngineInput } from "./progression-engine";
 
 export type NextWeekRecommendation = "Progress" | "Repeat" | "Deload" | "Recovery focus";
 
@@ -134,31 +135,82 @@ function chooseRecommendation(input: {
   liftsCompleted: number;
   adherenceScore: number;
   alcoholDays: number;
+  nutritionLogs: NutritionLog[];
+  bodyMetrics: BodyMetric[];
+  longRunCompleted: boolean;
 }): { nextWeekRecommendation: NextWeekRecommendation; recommendationReason: string } {
-  const runningAction = input.running.progression.action;
-  if (runningAction === "Recovery Focus") {
-    return { nextWeekRecommendation: "Recovery focus", recommendationReason: `${input.running.progression.reason} Running Engine V2 injury risk ${input.running.readiness.injuryRiskScore}/100 takes priority over progression.` };
-  }
-  if (runningAction === "Regress") {
-    return { nextWeekRecommendation: "Deload", recommendationReason: `${input.running.progression.reason} Running Engine V2 recommends reducing run load before progressing.` };
-  }
-  if (input.weeklyReadiness.status === "Red") {
-    return { nextWeekRecommendation: "Deload", recommendationReason: `Weekly readiness is Red because ${input.weeklyReadiness.reason}, so hold or reduce training load and avoid aggressive calorie cuts.` };
-  }
-  if (runningAction === "Hold") {
-    const longRunMissed = input.running.longRunStatus.status === "unknown" || input.running.longRunStatus.status === "watch";
-    const recoveryWarning = input.weeklyReadiness.status === "Yellow" && input.weeklyReadiness.reasons.some((reason) => reason.severity === "red" || reason.factor === "sleep" || reason.factor === "soreness" || reason.factor === "energy" || reason.factor === "pain");
-    const legacyReason = longRunMissed
-      ? "Long run was missed, so repeat the current week instead of progressing."
-      : recoveryWarning
-        ? "Weekly readiness is Yellow with a major recovery warning, so repeat instead of progressing."
-        : `${input.running.progression.reason} Repeat the week until Running Engine V2 supports progression.`;
-    return { nextWeekRecommendation: "Repeat", recommendationReason: legacyReason };
-  }
-  if (input.liftsCompleted >= 3 && input.adherenceScore >= 80 && input.alcoholDays < 2) {
-    return { nextWeekRecommendation: "Progress", recommendationReason: `Long run was completed. ${input.running.progression.reason} Lifting consistency and adherence also support conservative progression.` };
-  }
-  return { nextWeekRecommendation: "Repeat", recommendationReason: "Running Engine V2 supports progression, but lifting, nutrition, alcohol, or recovery consistency is not strong enough. Repeat before progressing." };
+  const weights = input.bodyMetrics.map((entry) => entry.weight).filter((weight) => Number.isFinite(weight) && weight > 0);
+  const firstWeight = weights[0] ?? null;
+  const currentWeight = weights.at(-1) ?? null;
+  const weightChange = firstWeight !== null && currentWeight !== null ? round(currentWeight - firstWeight) : null;
+  const waists = input.bodyMetrics.map((entry) => entry.waist).filter((waist): waist is number => Number.isFinite(waist));
+  const waistTrend = waists.length >= 2 ? round(waists[waists.length - 1] - waists[0]) : null;
+  const caloriesAdherence = calorieAdherence(input.nutritionLogs);
+  const proteinAdherence = Math.min(100, Math.round(((average(input.nutritionLogs.map((log) => log.protein)) ?? 0) / 220) * 100));
+  const macroAdherence = input.nutritionLogs.length ? Math.round((caloriesAdherence + proteinAdherence) / 2) : 0;
+  const progressionInput: ProgressionEngineInput = {
+    readinessResult: input.weeklyReadiness,
+    nutritionResult: {
+      macroAdherence,
+      caloriesAdherence,
+      proteinAdherence,
+      loggingConsistency: input.nutritionLogs.length ? Math.min(100, Math.round((input.nutritionLogs.length / 7) * 100)) : 0,
+      alcoholDays: input.alcoholDays,
+      confidence: input.nutritionLogs.length >= 5 ? "High" : input.nutritionLogs.length >= 3 ? "Medium" : "Low",
+    },
+    runningResult: input.running,
+    workoutResult: {
+      overallDecision: input.liftsCompleted >= 3 ? "Progress" : "Repeat",
+      strengthProgression: {
+        action: input.liftsCompleted >= 3 ? "Progress" : "Repeat",
+        exercisesProgressing: input.liftsCompleted >= 3 ? ["weekly lifting consistency"] : [],
+        exercisesStalled: input.liftsCompleted >= 3 ? [] : ["weekly lifting consistency"],
+        exercisesRegressing: [],
+      },
+      hypertrophyProgression: { action: input.liftsCompleted >= 3 ? "Progress" : "Repeat" },
+      fatigue: { systemicFatigueScore: input.weeklyReadiness.status === "Red" ? 80 : input.weeklyReadiness.status === "Yellow" ? 45 : 20, fatigueStatus: input.weeklyReadiness.status === "Red" ? "severe" : input.weeklyReadiness.status === "Yellow" ? "moderate" : "low" },
+      prs: { newPrs: [] },
+      confidenceScore: 70,
+      dataQualityScore: 70,
+    },
+    weightTrend: {
+      currentWeight,
+      goalWeight: 199.9,
+      sevenDayAverage: average(weights),
+      fourteenDayAverage: average(weights),
+      weeklyLossRate: weightChange === null ? null : Math.max(0, -weightChange),
+      waistTrend,
+    },
+    weeklyReviewMetrics: {
+      adherenceScore: input.adherenceScore,
+      trainingAdherence: Math.min(100, Math.round((input.liftsCompleted / 4) * 100)),
+      nutritionAdherence: macroAdherence,
+      longRunCompleted: input.longRunCompleted,
+      liftsCompleted: input.liftsCompleted,
+      plannedLifts: 4,
+      missedWorkouts: Math.max(0, 4 - input.liftsCompleted),
+      missedRuns: input.longRunCompleted ? 0 : 1,
+      missedLogs: Math.max(0, 7 - input.nutritionLogs.length),
+      missedCheckIns: 0,
+      missingNutritionDays: Math.max(0, 7 - input.nutritionLogs.length),
+      missingBodyMetrics: input.bodyMetrics.length ? 0 : 1,
+      weeklyFatigue: input.weeklyReadiness.status === "Red" ? "severe" : input.weeklyReadiness.status === "Yellow" ? "moderate" : "low",
+      recoveryTrend: input.weeklyReadiness.status === "Red" ? "poor" : input.weeklyReadiness.status === "Yellow" ? "stable" : "improving",
+      strengthProgressStalled: input.liftsCompleted < 3,
+      weeksFatLossBelowMinimum: weightChange !== null && Math.max(0, -weightChange) < 0.25 ? 3 : 0,
+    },
+    goalContext: {
+      fatLossGoal: { label: "Under 200 lb" },
+      physiqueGoal: { label: "Greek God physique" },
+      strengthGoal: { label: "Strength progression" },
+      halfMarathonGoal: { label: "January 17 half marathon" },
+    },
+  };
+  const progression = evaluateProgression(progressionInput);
+  return {
+    nextWeekRecommendation: progression.weeklyDecision === "Recovery Focus" ? "Recovery focus" : progression.weeklyDecision,
+    recommendationReason: progression.reasons.join(" "),
+  };
 }
 
 export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWindow): WeeklyReviewSummary {
@@ -187,7 +239,7 @@ export function buildWeeklyReviewSummary(state: AppState, window: WeeklyReviewWi
   const runPainSeverity = runLogs.reduce((max, entry) => Math.max(max, entry.pain || (entry.painScore ?? 0) > 0 ? (entry.painScore ?? 0) : 0), 0) || null;
   const weeklyReadiness = evaluateReadiness(readinessInputFromWeeklyWindow({ checkIns, runPainSeverity }));
   const running = evaluateRunning(buildRunningEngineInputForWeeklyReview({ window, runLogs, checkIns, weeklyReadiness, totalWeeklyMiles }));
-  const recommendation = chooseRecommendation({ running, weeklyReadiness, liftsCompleted, adherenceScore, alcoholDays });
+  const recommendation = chooseRecommendation({ running, weeklyReadiness, liftsCompleted, adherenceScore, alcoholDays, nutritionLogs, bodyMetrics, longRunCompleted });
 
   return {
     startDate: window.startDate,
