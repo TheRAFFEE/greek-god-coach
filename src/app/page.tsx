@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   adjustWorkoutForReadiness,
   calculateReadiness,
@@ -25,13 +25,11 @@ import { buildConfirmedFoodAiMealLog, buildFoodAiMealFromMealLog, buildFoodAiRev
 import { buildWeeklyReviewSummary } from "@/lib/weekly-review";
 import { buildCompactAppChrome } from "@/lib/app-chrome";
 import { buildHomeCommandCenter } from "@/lib/home-command-center";
+import { buildHomeDailyDashboard } from "@/lib/home-daily-dashboard";
 import { buildProgressInsightsModel, type ProgressInsightTone } from "@/lib/progress-insights-ui";
 import { buildRaceCalendarUiModel, type RaceCalendarUiModel } from "@/lib/race-calendar-ui";
 import { buildRaceCalendarSettingsModel, saveRaceCalendarSettings, type RaceCalendarSettingsForm, type RaceCalendarSettingsModel } from "@/lib/race-calendar-settings-ui";
 import { buildMissionControlUiModel, type MissionControlUiModel } from "@/lib/mission-control-ui";
-import { buildMissionControlRoutes, type MissionControlRoute } from "@/lib/mission-control-routing";
-import { buildAuditCenterUiModel, type AuditCenterUiModel } from "@/lib/audit-center-ui";
-import { buildWeekReviewUiModel, type WeekReviewUiModel } from "@/lib/week-review-ui";
 import { evaluatePhysique } from "@/lib/physique-engine";
 import { evaluateOrchestrator } from "@/lib/orchestrator-engine";
 import { appNavigation, type PrimaryNavigationId } from "@/lib/navigation";
@@ -72,13 +70,6 @@ function useDataConfidence(state: AppState, focus: DataConfidenceFocus) {
   return useMemo(() => buildDataConfidenceNote(state, focus, todayIso()), [state, focus]);
 }
 
-function currentWeekWindow(endDate: string) {
-  const end = new Date(`${endDate}T00:00:00.000Z`);
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - 6);
-  return { weekStartDate: start.toISOString().slice(0, 10), weekEndDate: endDate };
-}
-
 function downloadAppStateBackup(state: AppState) {
   if (typeof window === "undefined") return;
   const exportedAt = new Date().toISOString();
@@ -98,12 +89,6 @@ function downloadAppStateBackup(state: AppState) {
 const inputClass = "rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-white outline-none ring-amber-400/30 focus:ring-2";
 
 type ProgressSectionId = "weight" | "run" | "review" | "photos" | "race" | "adherence" | "goals" | "performance" | "physique" | "recovery" | "nutrition" | "strength" | "coachSummary" | "missing";
-
-const progressSectionIds = new Set<ProgressSectionId>(["weight", "run", "review", "photos", "race", "adherence", "goals", "performance", "physique", "recovery", "nutrition", "strength", "coachSummary", "missing"]);
-
-function toProgressSectionId(sectionId: string): ProgressSectionId {
-  return progressSectionIds.has(sectionId as ProgressSectionId) ? sectionId as ProgressSectionId : "missing";
-}
 
 function Sparkline({ values, color = "#fbbf24" }: { values: number[]; color?: string }) {
   if (values.length < 2) return <div className="h-24 rounded-2xl bg-white/[0.03]" />;
@@ -216,34 +201,9 @@ export default function Home() {
       progressionEngineResult: homeCommandCenter.progressionEngineResult,
       trainingEngineResult: homeCommandCenter.trainingEngineResult,
     });
-    const auditCenter = buildAuditCenterUiModel({
-      readinessEngineResult: readiness,
-      progressionEngineResult: homeCommandCenter.progressionEngineResult,
-      performanceEngineResult: homeCommandCenter.performanceEngineResult,
-      physiqueEngineResult,
-      raceCalendarEngineResult: raceCalendar.engineResults.raceCalendar,
-      orchestratorEngineResult,
-    });
-    const weekWindow = currentWeekWindow(todayIso());
-    const weekReview = buildWeekReviewUiModel({
-      ...weekWindow,
-      workoutsPlanned: 4,
-      runsPlanned: 3,
-      workoutSessions: state.workoutSessions ?? [],
-      runLogs: state.runLogs ?? [],
-      nutritionLogs: state.nutritionLogs ?? [],
-      checkIns: state.checkIns ?? [],
-      bodyMetrics: state.bodyMetrics ?? [],
-      progressionEngineResult: homeCommandCenter.progressionEngineResult,
-      performanceEngineResult: homeCommandCenter.performanceEngineResult,
-      physiqueEngineResult,
-      orchestratorEngineResult,
-    });
-    return { missionControl, auditCenter, weekReview };
-  }, [state, homeCommandCenter, readiness]);
+    return { missionControl };
+  }, [state, homeCommandCenter]);
   const missionControl = missionControlContext?.missionControl ?? null;
-  const auditCenter = missionControlContext?.auditCenter ?? null;
-  const weekReview = missionControlContext?.weekReview ?? null;
   useEffect(() => {
     if (!state || !dailyPrescription || !readiness || !latestCheckIn) return;
     const day = dailyPrescription.date.slice(0, 10);
@@ -288,18 +248,9 @@ export default function Home() {
       }}
     />;
   }
-  if (!state || !readiness || !macroTarget || !trend || !weeklyReview || !dailyPrescription || !homeCommandCenter || !missionControl || !auditCenter || !weekReview) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
+  if (!state || !readiness || !macroTarget || !trend || !weeklyReview || !dailyPrescription || !homeCommandCenter || !missionControl) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
 
   const updateState = (next: AppState) => setState(next);
-  const missionControlRoutes = buildMissionControlRoutes(missionControl);
-  const handleMissionControlRoute = (route: MissionControlRoute) => {
-    if (route.destination === "training") {
-      setActive("Train");
-      return;
-    }
-    setActiveProgressSection(route.destination === "raceCalendar" ? "race" : toProgressSectionId(route.sectionId));
-    setActive("Progress");
-  };
   const appChrome = buildCompactAppChrome({ currentWeek: selectedWeek });
   return <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#3f2f12,transparent_30%),linear-gradient(135deg,#050505,#111111_50%,#050505)] text-zinc-100">
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -312,7 +263,7 @@ export default function Home() {
       </header>
 
       <div className="py-2">
-        {active === "Home" && <Dashboard model={homeCommandCenter} missionControl={missionControl} auditCenter={auditCenter} weekReview={weekReview} missionRoutes={missionControlRoutes} onMissionRoute={handleMissionControlRoute} onDailyCheckIn={() => { setActiveLogSection("checkin"); setActive("Log"); }} onStartWorkout={() => setActive("Train")} onWeeklyCheckIn={() => { setActiveLogSection("body"); setActive("Log"); }} />}
+        {active === "Home" && <Dashboard model={homeCommandCenter} missionControl={missionControl} onStartWorkout={() => setActive("Train")} />}
         {active === "Train" && <TrainScreen state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={adjustedWorkout} originalWorkout={currentWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} runTrends={runTrends} plannedRunDistance={plannedRunDistance} trainingEngineResult={homeCommandCenter.trainingEngineResult} />}
         {active === "Log" && <LogScreen state={state} updateState={updateState} readiness={readiness} trend={trend} section={activeLogSection} setSection={setActiveLogSection} />}
         {active === "Progress" && <ProgressScreen state={state} updateState={updateState} weeklyReview={weeklyReview} section={activeProgressSection} setSection={setActiveProgressSection} />}
@@ -337,163 +288,41 @@ function RecoveryScreen({ result, onRestoreSnapshot, onRestorePreRestore, onCont
   </main>;
 }
 
-function RouteButton({ children, onClick, className }: { children: ReactNode; onClick: () => void; className: string }) {
-  return <div role="button" tabIndex={0} onClick={onClick} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onClick(); }} className={`${className} cursor-pointer text-left transition hover:border-amber-300/50 hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-amber-300/50`}>{children}</div>;
-}
+function Dashboard({ model, missionControl, onStartWorkout }: { model: ReturnType<typeof buildHomeCommandCenter>; missionControl: MissionControlUiModel; onStartWorkout: () => void }) {
+  const dailyDashboard = buildHomeDailyDashboard({ home: model, missionControl });
+  const sectionTone = (label: string, value: string) => {
+    if (label === "Recovery status") return value.includes("Green") ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : value.includes("Red") ? "border-red-300/25 bg-red-300/10 text-red-100" : "border-amber-300/25 bg-amber-300/10 text-amber-100";
+    if (label === "Primary mission") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+    return "border-white/10 bg-white/[0.04] text-zinc-100";
+  };
 
-function MissionControlDashboard({ model, routes, onRoute }: { model: MissionControlUiModel; routes: ReturnType<typeof buildMissionControlRoutes>; onRoute: (route: MissionControlRoute) => void }) {
-  return <section className="grid gap-3 rounded-3xl border border-amber-300/40 bg-[radial-gradient(circle_at_top,rgba(251,191,36,.18),transparent_42%),rgba(15,15,15,.92)] p-4 shadow-2xl shadow-black/40">
+  return <section className="grid gap-2 rounded-3xl border border-amber-300/30 bg-[radial-gradient(circle_at_top_right,rgba(251,191,36,.16),transparent_34%),rgba(10,10,10,.94)] p-3 shadow-2xl shadow-black/30">
     <div>
-      <p className="text-xs font-black uppercase tracking-[0.25em] text-amber-300/80">Mission Control</p>
-      <h2 className="mt-1 text-3xl font-black tracking-tight text-white">{model.primaryMission.value}</h2>
-      <p className="mt-1 text-sm text-zinc-400">{model.todayFocus.value}</p>
+      <p className="text-[10px] font-black uppercase tracking-[0.24em] text-amber-300/80">Home</p>
+      <h2 className="text-xl font-black text-white">{dailyDashboard.question}</h2>
     </div>
-    <div className="grid gap-3">
-      <RouteButton onClick={() => onRoute(routes.primaryMission)} className="rounded-3xl border border-white/10 bg-black/35 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Today’s Mission</p><div className="mt-3 grid gap-2"><Stat label={model.primaryMission.label} value={model.primaryMission.value} tone="yellow" /><Stat label={model.secondaryMission.label} value={model.secondaryMission.value} /><Stat label={model.todayFocus.label} value={model.todayFocus.value} /></div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.biggestRisk)} className="rounded-3xl border border-red-300/20 bg-red-950/20 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-red-200/70">Biggest Risk</p><p className="mt-2 text-2xl font-black text-red-100">{model.biggestRisk.value}</p>{model.biggestRisk.severity && <p className="mt-1 text-xs font-bold uppercase tracking-[0.18em] text-red-200/70">Severity: {model.biggestRisk.severity}</p>}</RouteButton>
-      <RouteButton onClick={() => onRoute(routes.biggestOpportunity)} className="rounded-3xl border border-emerald-300/20 bg-emerald-950/20 p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-emerald-200/70">Biggest Opportunity</p><p className="mt-2 text-2xl font-black text-emerald-100">{model.biggestOpportunity.value}</p></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.weeklyDecision)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">This Week’s Decision</p><h2 className="mt-1 text-2xl font-black text-white">{model.weekFocus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.weeklyDecision.label} value={model.weeklyDecision.value} /><Stat label={model.nutritionDecision.label} value={model.nutritionDecision.value} /><Stat label={model.decisionConfidence.label} value={model.decisionConfidence.value} /></div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.performanceSnapshot)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Performance Snapshot</p><h2 className="mt-1 text-2xl font-black text-white">{model.performanceStatus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.performanceScore.label} value={model.performanceScore.value} /><Stat label={model.performanceStatus.label} value={model.performanceStatus.value} sub={model.performanceStatus.sub} /><Stat label="Confidence" value={model.performanceStatus.sub ?? "Unknown"} /></div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.physiqueSnapshot)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Physique Snapshot</p><h2 className="mt-1 text-2xl font-black text-white">{model.physiqueStatus.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.physiqueScore.label} value={model.physiqueScore.value} /><Stat label={model.physiqueStatus.label} value={model.physiqueStatus.value} sub={model.physiqueStatus.sub} /><Stat label="Confidence" value={model.physiqueStatus.sub ?? "Unknown"} /></div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.raceStatus)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Race Status</p><h2 className="mt-1 text-2xl font-black text-white">{model.raceReadiness.value}</h2><div className="mt-3 grid gap-3 sm:grid-cols-3"><Stat label={model.raceReadiness.label} value={model.raceReadiness.value} /><Stat label={model.racePhase.label} value={model.racePhase.value} /><Stat label={model.raceWeeksRemaining.label} value={model.raceWeeksRemaining.value} /></div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.goalStatus)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">Goal Status</p><h2 className="mt-1 text-2xl font-black text-white">Goal tracking engine results</h2><div className="mt-3 grid gap-3 sm:grid-cols-2">{model.goalStatuses.map((goal) => <Stat key={goal.label} label={goal.label} value={goal.status} sub={`Confidence: ${goal.confidence}`} />)}</div></RouteButton>
-      <RouteButton onClick={() => onRoute(routes.coachSummary)} className="rounded-3xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs font-black uppercase tracking-[0.2em] text-zinc-500">{model.coachSummary.label}</p><h2 className="mt-1 text-2xl font-black text-white">Coach Summary</h2><p className="mt-3 text-sm leading-6 text-zinc-200">{model.coachSummary.value}</p></RouteButton>
-    </div>
-  </section>;
-}
 
-function AuditCenter({ model }: { model: AuditCenterUiModel }) {
-  const sourceLabel = (source: string) => source === "RaceCalendar" ? "Race" : source;
-  const countEntries = Object.entries(model.sourceCounts);
-  return <section className="rounded-3xl border border-sky-300/25 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,.14),transparent_35%),rgba(15,15,15,.88)] p-4 shadow-2xl shadow-black/30">
-    <div className="flex items-start justify-between gap-3">
-      <div>
-        <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-200/80">Audit Center</p>
-        <h2 className="mt-1 text-2xl font-black text-white">Audit Summary</h2>
-      </div>
-      <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-right">
-        <p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Total audit entries</p>
-        <p className="text-2xl font-black text-white">{model.totalEntries}</p>
-      </div>
-    </div>
-    <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-      {countEntries.map(([source, count]) => <div key={source} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{sourceLabel(source)}</p><p className="mt-1 text-xl font-black text-white">{count}</p></div>)}
-    </div>
-    {model.entries.length === 0 ? <p className="mt-4 rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-4 text-sm text-zinc-300">No audit data available yet.</p> : <div className="mt-4 grid gap-2">
-      {model.entries.slice(0, 12).map((entry, index) => <div key={`${entry.source}-${index}-${entry.message}`} className="rounded-2xl border border-white/10 bg-black/25 p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full border border-sky-200/20 bg-sky-300/10 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-sky-100">{sourceLabel(entry.source)}</span>
-          {entry.confidence && <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-300">Confidence: {entry.confidence}</span>}
-          {entry.timestamp && <span className="text-[11px] text-zinc-500">{entry.timestamp}</span>}
-        </div>
-        <p className="mt-2 text-sm leading-6 text-zinc-200">{entry.message}</p>
+    <div className="grid gap-1.5">
+      {dailyDashboard.sections.map((section) => <div key={section.label} className={`rounded-xl border px-3 py-2 ${sectionTone(section.label, section.value)}`}>
+        <p className="text-[9px] font-black uppercase tracking-[0.16em] opacity-70">{section.label}</p>
+        <p className="text-sm font-black leading-tight">{section.value}</p>
+        {section.sub && <p className="text-[11px] leading-tight opacity-70">{section.sub}</p>}
       </div>)}
-    </div>}
+    </div>
+
+    <details className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-300">
+      <summary className="cursor-pointer text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">{dailyDashboard.why.title}</summary>
+      <div className="mt-3 grid gap-2">
+        {dailyDashboard.why.items.map((item) => <div key={item.label} className="rounded-xl bg-white/[0.04] p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{item.label}</p>
+          <p className="mt-1 font-bold text-white">{item.value}</p>
+          {item.sub && <p className="mt-1 text-xs text-zinc-500">{item.sub}</p>}
+        </div>)}
+      </div>
+    </details>
+
+    <button type="button" onClick={onStartWorkout} className="rounded-xl bg-amber-400 px-4 py-2 text-sm font-black text-black shadow-lg shadow-amber-950/20">{dailyDashboard.ctas[0].label}</button>
   </section>;
-}
-
-function WeekInReview({ model }: { model: WeekReviewUiModel }) {
-  const empty = model.weekOutcome === "Insufficient Data";
-  return <section className="rounded-3xl border border-emerald-300/25 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,.14),transparent_35%),rgba(15,15,15,.88)] p-4 shadow-2xl shadow-black/30">
-    <p className="text-xs font-black uppercase tracking-[0.25em] text-emerald-200/80">Week-In-Review</p>
-    <h2 className="mt-1 text-2xl font-black text-white">{empty ? "Weekly report pending" : model.weekOutcome}</h2>
-    {empty ? <p className="mt-4 rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-4 text-sm text-zinc-300">{model.summary}</p> : <div className="mt-4 grid gap-4">
-      <div className="grid gap-2 sm:grid-cols-3">
-        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Workout adherence</p><p className="mt-1 text-xl font-black text-white">{model.workoutsCompleted} / {model.workoutsPlanned}</p></div>
-        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Run adherence</p><p className="mt-1 text-xl font-black text-white">{model.runsCompleted} / {model.runsPlanned}</p></div>
-        <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">Nutrition adherence</p><p className="mt-1 text-xl font-black text-white">{model.nutritionAdherence}%</p></div>
-      </div>
-      <div className="grid gap-3 lg:grid-cols-2">
-        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Body Metrics</p>
-          <p className="mt-2 text-sm text-zinc-300">Average weight: <span className="font-bold text-white">{model.averageWeight !== undefined ? `${model.averageWeight} lb` : "Need more measurements"}</span></p>
-          <p className="text-sm text-zinc-300">Weight trend: <span className="font-bold text-white">{model.weightTrend ?? "Need more measurements"}</span></p>
-          <p className="text-sm text-zinc-300">Physique trend: <span className="font-bold text-white">{model.physiqueTrend ?? "No physique trend yet"}</span></p>
-        </div>
-        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
-          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Recovery</p>
-          <p className="mt-2 text-sm text-zinc-300">Readiness trend: <span className="font-bold text-white">{model.readinessTrend ?? "Need more check-ins"}</span></p>
-          <p className="text-sm text-zinc-300">Recovery trend: <span className="font-bold text-white">{model.recoveryTrend ?? "Need more check-ins"}</span></p>
-        </div>
-      </div>
-      <div className="grid gap-3 lg:grid-cols-3">
-        <div className="rounded-2xl border border-emerald-300/15 bg-emerald-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-200">Biggest Win</p><p className="mt-2 text-sm text-white">{model.biggestWin ?? "No clear weekly win yet"}</p></div>
-        <div className="rounded-2xl border border-amber-300/15 bg-amber-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-amber-200">Biggest Risk</p><p className="mt-2 text-sm text-white">{model.biggestRisk ?? "No major weekly risk surfaced"}</p></div>
-        <div className="rounded-2xl border border-sky-300/15 bg-sky-300/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-sky-200">Next Week Focus</p><p className="mt-2 text-sm text-white">{model.nextWeekFocus ?? "Keep building consistency"}</p></div>
-      </div>
-      <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-zinc-500">Executive Summary</p><p className="mt-2 text-sm leading-6 text-zinc-200">{model.summary}</p></div>
-    </div>}
-  </section>;
-}
-
-function Dashboard({ model, missionControl, auditCenter, weekReview, missionRoutes, onMissionRoute, onDailyCheckIn, onStartWorkout, onWeeklyCheckIn }: { model: ReturnType<typeof buildHomeCommandCenter>; missionControl: MissionControlUiModel; auditCenter: AuditCenterUiModel; weekReview: WeekReviewUiModel; missionRoutes: ReturnType<typeof buildMissionControlRoutes>; onMissionRoute: (route: MissionControlRoute) => void; onDailyCheckIn: () => void; onStartWorkout: () => void; onWeeklyCheckIn: () => void }) {
-  const readinessTone = model.coachBrief.readiness === "Green" ? "text-emerald-300" : model.coachBrief.readiness === "Yellow" ? "text-amber-300" : "text-red-300";
-  const statusTone = (status: string) => status === "On Track" ? "text-emerald-300" : status === "At Risk" ? "text-amber-300" : status === "Off Track" ? "text-red-300" : "text-zinc-400";
-  const metric = (label: string, value: string | number, tone = "text-white") => <div className="rounded-2xl border border-white/10 bg-black/25 p-3"><p className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">{label}</p><p className={`mt-1 truncate text-lg font-black ${tone}`}>{value}</p></div>;
-  return <div className="grid gap-4">
-    <MissionControlDashboard model={missionControl} routes={missionRoutes} onRoute={onMissionRoute} />
-    <AuditCenter model={auditCenter} />
-    <WeekInReview model={weekReview} />
-    <section className="rounded-3xl border border-amber-300/30 bg-[radial-gradient(circle_at_top_right,rgba(251,191,36,.18),transparent_35%),rgba(69,26,3,.18)] p-4 shadow-2xl shadow-black/30">
-    <p className="text-xs uppercase tracking-[0.25em] text-amber-300/80">Home</p>
-    <h2 className="mt-1 text-2xl font-black text-white">Today’s coach brief</h2>
-
-    <div className="mt-4 grid grid-cols-3 gap-2">
-      {metric("Readiness", model.coachBrief.readiness, readinessTone)}
-      {metric("Goal Status", model.coachBrief.overallGoalStatus, statusTone(model.coachBrief.overallGoalStatus))}
-      {metric("Weekly Decision", model.coachBrief.weeklyDecision)}
-    </div>
-
-    <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
-      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-        <h3 className="text-lg font-black text-white">Today’s Goals</h3>
-        <div className="mt-3 grid gap-2">
-          {model.todaysGoals.map((goal) => <div key={`${goal.priority}-${goal.label}`} className="flex gap-2 rounded-xl bg-white/[0.04] p-3 text-sm text-zinc-200"><span className="text-emerald-300">✓</span><div><p className="font-semibold text-white">{goal.label}</p><p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{goal.priority} · {goal.source}</p></div></div>)}
-        </div>
-      </div>
-
-      <div className="grid gap-3">
-        <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-          <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Goal Status</h3>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-            {Object.entries(model.goalStatuses).map(([label, status]) => <div key={label} className="rounded-xl bg-white/[0.04] p-3"><p className="text-zinc-400">{label}</p><p className={`font-black ${statusTone(status)}`}>{status}</p></div>)}
-          </div>
-        </div>
-        <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-          <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Today’s Training</h3>
-          <div className="mt-3 grid gap-2 text-sm">
-            <p className="rounded-xl bg-white/[0.04] p-3"><b className="text-white">Today’s Workout:</b> {model.training.workout.name} · {model.training.workout.estimatedDurationMinutes} min · {model.training.workout.status}</p>
-            <p className="rounded-xl bg-white/[0.04] p-3"><b className="text-white">Today’s Run:</b> {model.training.run.name} · {model.training.run.estimatedDurationMinutes} min · {model.training.run.status}</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div className="mt-4 grid gap-3 lg:grid-cols-2">
-      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-        <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">Recovery</h3>
-        <p className="mt-2 text-sm text-zinc-300">Readiness: <b className={readinessTone}>{model.recovery.readiness}</b> · Confidence: <b className="text-white">{model.recovery.confidence}</b></p>
-        {model.recovery.warning && <p className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-sm text-amber-100">Warning: {model.recovery.warning}</p>}
-      </div>
-      <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
-        <h3 className="text-sm font-black uppercase tracking-[0.18em] text-zinc-400">{model.confidenceCards[0].label}</h3>
-        <p className="mt-2 text-sm text-zinc-300">Data Quality: <b className="text-white">{model.confidenceCards[0].value}</b></p>
-        <p className="mt-1 text-xs text-zinc-500">Reason: {model.confidenceCards[0].reason}</p>
-      </div>
-    </div>
-
-    {model.sundayPrompt.visible && <div className="mt-4 rounded-2xl border border-sky-300/25 bg-sky-300/10 p-4">
-      <h3 className="font-black text-sky-100">{model.sundayPrompt.title}</h3>
-      <p className="mt-1 text-sm text-sky-100/80">Please log: {model.sundayPrompt.items.join(", ")}</p>
-      <button type="button" onClick={onWeeklyCheckIn} className="mt-3 rounded-xl bg-sky-300 px-4 py-2 text-sm font-black text-black">{model.sundayPrompt.buttonLabel}</button>
-    </div>}
-
-    <div className="mt-4 grid gap-2 sm:grid-cols-2">
-      <button type="button" onClick={onDailyCheckIn} className="rounded-2xl bg-white px-4 py-3 text-base font-black text-black shadow-lg shadow-black/20">{model.actions.dailyCheckIn.label}</button>
-      <button type="button" onClick={onStartWorkout} className="rounded-2xl bg-amber-400 px-4 py-3 text-base font-black text-black shadow-lg shadow-amber-950/20">{model.actions.startWorkout.label}</button>
-    </div>
-    </section>
-  </div>;
 }
 
 function TrainScreen({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance, trainingEngineResult }: any) {
