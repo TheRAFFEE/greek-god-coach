@@ -1,0 +1,424 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Phase 27A — Planner Promotion Readiness Audit</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.45; color: #111827; margin: 48px; }
+  h1 { font-size: 28px; margin-bottom: 6px; }
+  h2 { font-size: 21px; margin-top: 28px; border-bottom: 1px solid #d1d5db; padding-bottom: 4px; }
+  h3 { font-size: 16px; margin-top: 20px; color: #1f2937; }
+  p, li { font-size: 11.5px; }
+  ul { margin-top: 4px; }
+  code, pre { font-family: "SFMono-Regular", Consolas, monospace; }
+  pre { background: #f3f4f6; padding: 10px; border-radius: 6px; overflow-wrap: break-word; white-space: pre-wrap; }
+  .score { font-size: 18px; font-weight: 700; color: #991b1b; }
+  .note { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 10px 12px; margin: 14px 0; }
+  .section { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+<h1>Phase 27A — Planner Promotion Readiness Audit</h1>
+<p><strong>Audit mode:</strong> No code, tests, UI, source-of-truth, persistence, or implementation files were modified.</p>
+<p><strong>Planner status:</strong> developer-only, advisory-only, read-only, not promoted.</p>
+
+<h2>1. Promotion readiness score</h2>
+<p class="score">38 / 100</p>
+<h3>Verdict</h3>
+<p>The planner is <strong>not ready</strong> to replace the legacy training engine yet.</p>
+<p>It has made strong progress as a developer-only advisory prescription model, especially around RecoveryDay preservation, core support extraction, deload metadata, duration fidelity, primary session resolution, and preview/train-screen developer models.</p>
+<p>However, it is still not safe as the app’s canonical runtime engine because the active app still depends on multiple legacy paths for Home display, Train execution, run/lift logging, readiness/recommendation/progression feedback loops, persistence, and source-of-truth state shape.</p>
+<p>The planner currently consumes legacy engine outputs more than it owns them.</p>
+
+<h2>2. Home integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/app/page.tsx</code>: <code>todayWorkout</code>, <code>adjustedTodayWorkout</code>, <code>todayRunDisplay</code>, <code>runningRecommendation</code>, <code>dailyPrescription</code>, <code>homeCommandCenter</code></li>
+<li><code>src/lib/home-command-center.ts</code>: <code>buildHomeCommandCenter</code>, <code>getTodayRunForDate</code>, <code>getScheduledRunForTraining</code>, calls to readiness/progression/goal/training evaluation</li>
+<li><code>src/lib/training-engine.ts</code>: <code>evaluateTraining</code></li>
+<li><code>src/lib/coach-engine.ts</code>: <code>generateDailyPrescription</code>, <code>adjustWorkoutForReadiness</code>, <code>generateRunningRecommendation</code></li>
+</ul>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>src/lib/training-planner.ts</code>: <code>buildDailyTrainingSession</code>, <code>DailyTrainingSession</code></li>
+<li><code>src/lib/training-planner-adapter.ts</code>: <code>buildPlannerSessionFromAppState</code></li>
+<li><code>src/lib/planner-shadow-observability.ts</code>: compares planner to legacy</li>
+<li><code>src/lib/planner-train-preview.ts</code>: developer-only preview model</li>
+<li><code>src/lib/planner-train-screen-v1.ts</code>: developer-only train-screen model</li>
+</ul>
+<h3>Missing capabilities</h3>
+<ul>
+<li>Home does not consume <code>DailyTrainingSession</code> as canonical daily session.</li>
+<li>Home still separately computes today workout, today run, daily prescription, running recommendation, and training engine output.</li>
+<li>Planner has no promoted Home adapter equivalent to <code>HomeCommandCenterModel</code>.</li>
+<li>Mission Control still consumes <code>homeCommandCenter.trainingEngineResult</code>, not planner output.</li>
+<li>Planner is only built when <code>plannerDebugEnabled</code> is true.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Home can show a session that diverges from planner.</li>
+<li>Planner may classify a day correctly while Home continues to display legacy adjusted workout/run labels.</li>
+<li>Duration/run fidelity improvements in planner do not automatically improve Home recommendation behavior.</li>
+<li>If planner is promoted without a Home adapter, dashboard and Train could disagree.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Home runtime is still legacy-source-driven, not planner-source-driven.</li>
+<li><strong>Critical:</strong> Planner has no production <code>DailyTrainingSession -> HomeCommandCenterModel</code> adapter.</li>
+<li><strong>Major:</strong> <code>buildHomeCommandCenter</code> independently runs training/progression/goal/readiness logic.</li>
+<li><strong>Major:</strong> Home still uses <code>getTodayRunForDate</code> and <code>getScheduledRunForTraining</code>, not planner run logging/prescription metadata.</li>
+</ul>
+<h3>Exact files involved</h3>
+<ul>
+<li><code>src/app/page.tsx</code></li>
+<li><code>src/lib/home-command-center.ts</code></li>
+<li><code>src/lib/home-daily-dashboard.ts</code></li>
+<li><code>src/lib/training-engine.ts</code></li>
+<li><code>src/lib/coach-engine.ts</code></li>
+<li><code>src/lib/training-planner.ts</code></li>
+<li><code>src/lib/training-planner-adapter.ts</code></li>
+<li><code>src/lib/planner-shadow-observability.ts</code></li>
+</ul>
+
+<h2>3. Train integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/app/page.tsx</code>: <code>TrainScreen</code>, <code>TrainingPlan</code>, <code>ActiveWorkout</code>, <code>TrainRunLogger</code></li>
+<li><code>src/lib/training-engine.ts</code>: <code>TrainingEngineResult</code></li>
+<li><code>src/lib/run-logger.ts</code>: <code>saveTrainRunLog</code></li>
+<li><code>src/lib/coach-engine.ts</code>: starting weight, next-set recommendation, next workout step, post-workout analysis</li>
+</ul>
+<p>Train execution still starts from the legacy <code>Workout</code> object: <code>displayedWorkout.id</code>, <code>displayedWorkout.title</code>, <code>displayedWorkout.exercises</code>.</p>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>src/lib/planner-train-preview.ts</code></li>
+<li><code>src/lib/planner-train-screen-v1.ts</code></li>
+<li><code>src/app/page.tsx</code>: <code>PlannerTrainPreviewDeveloperPanel</code>, <code>PlannerTrainScreenV1DeveloperPanel</code></li>
+</ul>
+<p>These are developer-only, read-only, advisory-only, visible behind <code>plannerDebugEnabled</code>, and not executable.</p>
+<h3>Missing capabilities</h3>
+<ul>
+<li>No production Train screen backed by <code>DailyTrainingSession</code>.</li>
+<li>No planner execution adapter that maps workout/run logging targets, blocks, support, and deload metadata into runtime logging.</li>
+<li><code>ActiveWorkout</code> still expects legacy <code>Workout</code> shape.</li>
+<li>Planner support blocks are visible but not executable/loggable.</li>
+<li>Hybrid behavior is not promotion-safe: planner train-screen lift logging appears only for <code>LiftDay</code>, which could hide lift logging for <code>HybridDay</code>.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>User could execute a legacy workout while planner says a different session should happen.</li>
+<li>Core/support/conditioning visibility in planner does not guarantee execution or logging.</li>
+<li>Planner logging targets exist as metadata, but Train does not use them for production behavior.</li>
+<li>Hybrid or mixed-modality days could lose logging affordances.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Train execution is not planner-backed.</li>
+<li><strong>Critical:</strong> Planner train screen is read-only preview, not runtime execution.</li>
+<li><strong>Critical:</strong> Existing active workout logging requires legacy <code>Workout.exercises</code>, not planner prescription blocks.</li>
+<li><strong>Major:</strong> Planner has no stable execution adapter for lift/run/support/conditioning/mobility blocks.</li>
+<li><strong>Major:</strong> Hybrid/mixed-session logging rules are not fully promotion-safe.</li>
+<li><strong>Major:</strong> Planner support work is not connected to any execution state.</li>
+</ul>
+<h3>Exact files involved</h3>
+<ul>
+<li><code>src/app/page.tsx</code></li>
+<li><code>src/lib/training-engine.ts</code></li>
+<li><code>src/lib/training-planner.ts</code></li>
+<li><code>src/lib/planner-train-preview.ts</code></li>
+<li><code>src/lib/planner-train-screen-v1.ts</code></li>
+<li><code>src/lib/run-logger.ts</code></li>
+<li><code>src/lib/workout-logger.ts</code></li>
+<li><code>src/lib/coach-engine.ts</code></li>
+<li><code>src/lib/types.ts</code></li>
+</ul>
+
+<h2>4. Log integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/app/page.tsx</code>: Log screen, check-in, nutrition, body metrics, photos, Train run logger, active workout</li>
+<li><code>src/lib/run-logger.ts</code></li>
+<li><code>src/lib/workout-logger.ts</code></li>
+<li><code>src/lib/daily-checkin.ts</code></li>
+<li><code>src/lib/log-tab-ui.ts</code></li>
+<li><code>src/lib/storage.ts</code></li>
+<li><code>src/lib/types.ts</code></li>
+</ul>
+<p>Persisted log data lives in <code>AppState</code>: check-ins, run logs, workout sessions, set logs, summaries, post-workout recommendations, adjustments, nutrition, body, and photo logs.</p>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>DailyWorkoutPrescription.loggingTarget</code></li>
+<li><code>DailyRunPrescription.loggingTarget</code></li>
+<li><code>DailyTrainingBlock.executionTarget</code></li>
+<li>Defined in <code>src/lib/training-planner.ts</code></li>
+</ul>
+<h3>Missing capabilities</h3>
+<ul>
+<li>No production mapper from planner logging targets to <code>RunLog</code>, <code>WorkoutSession</code>, <code>SetLog</code>, or <code>WorkoutSummary</code>.</li>
+<li>No planner-backed completion reconciliation.</li>
+<li>Planner completion status is read-only and computed from legacy logs.</li>
+<li>No log UI that says “log this planner block.”</li>
+<li>No migration for existing logs to planner session references.</li>
+<li>No source-preserving audit trail connecting logged work back to a planner session ID.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Promotion could break daily completion detection.</li>
+<li>Existing run/lift logs may no longer match planner prescription IDs.</li>
+<li>Duplicate or missing logs possible if planner and legacy paths coexist.</li>
+<li>Support work could be visible in planner but untracked in Log.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Planner logging targets are not production logging sources.</li>
+<li><strong>Critical:</strong> AppState has no persisted <code>DailyTrainingSession</code> or planner session reference for logs.</li>
+<li><strong>Major:</strong> Existing logging flows still depend on legacy workout/run structures.</li>
+<li><strong>Major:</strong> No migration strategy for old logs.</li>
+<li><strong>Major:</strong> No planner-backed completion status in persisted state.</li>
+<li><strong>Major:</strong> No rollback/backup plan specific to planner promotion.</li>
+</ul>
+
+<h2>5. Recommendation integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/lib/coach-engine.ts</code>: daily prescription, running recommendation, next-set recommendation, post-workout analysis, readiness adjustment</li>
+<li><code>src/app/page.tsx</code>: <code>dailyPrescription</code>, <code>runningRecommendation</code>, automatic adjustments</li>
+<li><code>src/lib/running-engine.ts</code></li>
+<li><code>src/lib/workout-engine.ts</code></li>
+</ul>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>BuildDailyTrainingSessionInput.runningRecommendation</code></li>
+<li><code>DailyTrainingSession.modifications</code></li>
+<li><code>DailyTrainingSession.warnings</code></li>
+<li><code>DailyTrainingSession.todayGoals</code></li>
+<li><code>DailyTrainingSession.run.runningRecommendationAction</code></li>
+</ul>
+<p>The planner carries recommendation inputs and modifications, but does not own recommendation generation.</p>
+<h3>Missing capabilities</h3>
+<ul>
+<li>Planner does not replace <code>generateDailyPrescription</code>.</li>
+<li>Planner does not replace <code>generateRunningRecommendation</code>.</li>
+<li>Planner does not own next-set or post-workout recommendations.</li>
+<li>Planner consumes <code>runningRecommendation</code>; it does not generate it.</li>
+<li>Recommendation side effects still write <code>adjustments</code> from legacy <code>dailyPrescription</code>.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Circular dependency if planner replaces training engine before recommendation sources are reconciled.</li>
+<li>Planner could recommend one session while legacy coach recommendations tell user another thing.</li>
+<li>Running recommendation currently does not run for zero-distance duration-based runs.</li>
+<li>Automatic adjustment log entries could record legacy decisions that conflict with planner decisions.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Recommendation engine ownership is unresolved.</li>
+<li><strong>Critical:</strong> Planner is not the source of daily prescription recommendations.</li>
+<li><strong>Critical:</strong> Recommendation side effects still come from legacy <code>dailyPrescription</code>.</li>
+<li><strong>Major:</strong> Running recommendations are distance-centric in the active app path.</li>
+<li><strong>Major:</strong> Next-set and post-workout recommendations are not planner-aware.</li>
+<li><strong>Major:</strong> No canonical conflict-resolution policy between planner and recommendation engines.</li>
+</ul>
+
+<h2>6. Readiness integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/app/page.tsx</code>: <code>calculateReadiness(latestCheckIn, baseline)</code>, adjusted workout, Home/Train readiness</li>
+<li><code>src/lib/coach-engine.ts</code>: <code>calculateReadiness</code></li>
+<li><code>src/lib/readiness-engine.ts</code>: <code>evaluateReadiness</code>, <code>readinessInputFromDailyCheckIn</code></li>
+<li><code>src/lib/daily-checkin.ts</code></li>
+<li><code>src/lib/home-command-center.ts</code></li>
+</ul>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>BuildDailyTrainingSessionInput.readinessResult</code></li>
+<li><code>DailyTrainingSession.readinessStatus</code></li>
+<li><code>DailyTrainingSession.status</code></li>
+<li><code>DailyTrainingSession.modifications</code></li>
+<li><code>DailyTrainingSession.warnings</code></li>
+</ul>
+<h3>Missing capabilities</h3>
+<ul>
+<li>Planner does not own readiness calculation.</li>
+<li>Planner adapter fabricates fallback readiness if not provided.</li>
+<li>No production policy for stale/missing readiness when planner is canonical.</li>
+<li>Active UI still applies <code>adjustWorkoutForReadiness</code> separately before planner.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Double-modification risk if planner is promoted without removing legacy readiness adjustment.</li>
+<li>Fallback readiness could be unsafe if accidentally used in production.</li>
+<li>Readiness status can be computed in multiple places.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Readiness ownership and call sequence are not promotion-safe.</li>
+<li><strong>Critical:</strong> Planner depends on readiness input; it does not define readiness truth.</li>
+<li><strong>Major:</strong> Duplicate readiness pathways need consolidation.</li>
+<li><strong>Major:</strong> Planner fallback readiness should remain shadow-only or be replaced by a production-safe missing-data policy.</li>
+</ul>
+
+<h2>7. Progression integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/lib/progression-engine.ts</code>: <code>evaluateProgression</code></li>
+<li><code>src/lib/home-command-center.ts</code>: weekly progression input</li>
+<li><code>src/lib/weekly-review.ts</code></li>
+<li><code>src/lib/running-engine.ts</code></li>
+<li><code>src/lib/workout-engine.ts</code></li>
+<li><code>src/app/page.tsx</code>: passes progression result into planner shadow only</li>
+</ul>
+<h3>Planner equivalent</h3>
+<ul>
+<li><code>BuildDailyTrainingSessionInput.progressionResult</code></li>
+<li><code>DailyTrainingSession.modifications</code></li>
+<li><code>DailyTrainingSession.warnings</code></li>
+<li>Recovery override when weekly decision is <code>Recovery Focus</code></li>
+</ul>
+<h3>Missing capabilities</h3>
+<ul>
+<li>Planner does not own weekly progression calculation.</li>
+<li>Planner cannot yet drive week-to-week plan modifications.</li>
+<li>Planner does not persist progression decisions.</li>
+<li>Planner does not replace <code>evaluateProgression</code>.</li>
+<li>No promotion-safe contract defining whether progression modifies daily prescription, next week plan, source training plan, recommendation copy, or logging expectations.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Progression decisions could be applied twice or ignored.</li>
+<li>Deload/recovery policy could diverge between planner metadata and progression engine decision.</li>
+<li>Long-run/running progression can still be decided outside planner while planner owns run prescription.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Progression integration is unresolved as a source-of-truth relationship.</li>
+<li><strong>Critical:</strong> Planner cannot safely replace training engine until progression decision ownership is explicitly staged.</li>
+<li><strong>Major:</strong> No planner-backed weekly planning/promotion path.</li>
+<li><strong>Major:</strong> No persisted progression audit attached to planner session.</li>
+</ul>
+
+<h2>8. Persistence integration readiness</h2>
+<h3>Current source of truth</h3>
+<ul>
+<li><code>src/lib/types.ts</code>: <code>AppState</code></li>
+<li><code>src/lib/storage.ts</code>: migration, load recovery, save state, localStorage snapshots</li>
+<li><code>src/lib/supabase-persistence.ts</code>: Supabase sync</li>
+<li><code>src/lib/backup-restore.ts</code></li>
+</ul>
+<h3>Planner equivalent</h3>
+<p>Planner has no persisted canonical state. <code>DailyTrainingSession</code> is generated ephemerally from app state, seed workouts, readiness, progression, goal tracking, running recommendation, and logs.</p>
+<h3>Missing capabilities</h3>
+<ul>
+<li>No <code>AppState.dailyTrainingSessions</code>.</li>
+<li>No persisted planner session ID.</li>
+<li>No persisted planner decision/audit artifact.</li>
+<li>No migration plan.</li>
+<li>No Supabase schema mapping for planner sessions.</li>
+<li>No backup/restore schema inclusion for planner sessions.</li>
+<li>No rollback strategy if planner promotion causes mismatched logs.</li>
+</ul>
+<h3>Risks</h3>
+<ul>
+<li>Promoted planner decisions would be non-reproducible if source inputs change.</li>
+<li>Logs could reference legacy workout IDs while UI references planner session IDs.</li>
+<li>Backup/restore cannot preserve planner session decisions.</li>
+<li>Supabase sync cannot persist planner sessions.</li>
+</ul>
+<h3>Blockers</h3>
+<ul>
+<li><strong>Critical:</strong> Persistence has no planner source-of-truth model.</li>
+<li><strong>Critical:</strong> Planner is generated-only and cannot be safely used as canonical runtime state.</li>
+<li><strong>Major:</strong> No migration/rollback plan.</li>
+<li><strong>Major:</strong> No Supabase schema contract.</li>
+<li><strong>Major:</strong> No backup/restore coverage for planner promotion.</li>
+</ul>
+
+<h2>9. Critical blockers summary</h2>
+<ol>
+<li><strong>Planner is not the runtime source of truth.</strong> Home and Train still build from legacy paths.</li>
+<li><strong>Train execution is still legacy-workout based.</strong> No executable production Train adapter exists.</li>
+<li><strong>Logging targets are planner metadata only.</strong> Runtime logging still writes through legacy forms.</li>
+<li><strong>Recommendation ownership is unresolved.</strong> Planner consumes recommendation outputs but does not replace them.</li>
+<li><strong>Readiness/progression ownership is unresolved.</strong> Planner consumes these outputs but active app computes and applies them separately.</li>
+<li><strong>Persistence has no planner state.</strong> No persisted planner session or planner audit artifact exists.</li>
+</ol>
+
+<h2>10. Major blockers summary</h2>
+<ol>
+<li>Home model adapter missing.</li>
+<li>Planner Train UI is preview-only.</li>
+<li>Hybrid/mixed modality logging needs hardening.</li>
+<li>Duration-based run recommendation gap remains active-path risk.</li>
+<li>Source-plan ownership remains seed-based.</li>
+<li>Shadow/promotion audit tools are not sufficient as promotion gates.</li>
+</ol>
+
+<h2>11. Minor blockers summary</h2>
+<ol>
+<li>Duplicate planner readiness construction in <code>page.tsx</code>.</li>
+<li>Regex classification still exists.</li>
+<li>UTC day-index assumptions should be validated before source-of-truth promotion.</li>
+<li>Developer-only UI language needs production removal or conversion.</li>
+<li>Planner source provenance is incomplete.</li>
+</ol>
+
+<h2>12. Estimated phases remaining before planner promotion</h2>
+<p>Estimated remaining work: <strong>7–9 phases</strong> before safe promotion.</p>
+<ol>
+<li>Phase 27B — Planner Promotion Contract</li>
+<li>Phase 27C — Home Adapter Readiness</li>
+<li>Phase 27D — Train Execution Adapter</li>
+<li>Phase 27E — Log/Persistence Mapping</li>
+<li>Phase 27F — Recommendation Ownership Reconciliation</li>
+<li>Phase 27G — Readiness/Progression Ownership Reconciliation</li>
+<li>Phase 27H — Full Shadow Trial + Safety Gates</li>
+<li>Phase 28A — Feature-flagged Planner Runtime Pilot</li>
+<li>Phase 28B — Promotion / Legacy Fallback Removal Plan</li>
+</ol>
+<p>I would not promote before Phase 28A at the earliest.</p>
+
+<h2>13. Recommended promotion roadmap</h2>
+<h3>Phase 27B — Planner Promotion Contract</h3>
+<p>Audit/design only. Define canonical ownership boundaries, planner input/output contracts, remaining engine ownership, planner non-mutation rules, migration requirements, and rollback requirements.</p>
+<p><strong>Deliverable:</strong> <code>PLANNER_PROMOTION_CONTRACT_V1.md</code>. No code changes.</p>
+
+<h3>Phase 27C — Home Adapter Plan + Implementation</h3>
+<p>Create a production-safe adapter: <code>DailyTrainingSession -> HomeCommandCenterModel-compatible training fields</code>.</p>
+<p>Required proofs: Home workout from planner, Home run from planner, duration-based runs display correctly, RecoveryDay displays as recovery, deload metadata appears only as metadata, and no planner promotion unless behind explicit flag.</p>
+
+<h3>Phase 27D — Train Execution Adapter</h3>
+<p>Create adapter: <code>DailyTrainingSession -> executable Train model</code>.</p>
+<p>Must support lift blocks, run blocks, recovery blocks, mobility blocks, conditioning blocks, support/core blocks, logging visibility, logging defaults, and hybrid behavior without duplicate legacy adjustment.</p>
+
+<h3>Phase 27E — Log + Persistence Mapping</h3>
+<p>Design and implement safe persistence model. Decide whether to persist full session, planner session ID only, planner audit hash, source workout ID plus planner version, or logging target references. Update localStorage migration, Supabase sync contract, backup/restore, and rollback plan.</p>
+
+<h3>Phase 27F — Recommendation Ownership Reconciliation</h3>
+<p>Define whether planner consumes, wraps, owns final daily copy, owns adjustment entries, or triggers run/workout recommendations. Eliminate conflicts between planner, daily prescription, running recommendation, post-workout recommendations, and automatic adjustments.</p>
+
+<h3>Phase 27G — Readiness/Progression Ownership Reconciliation</h3>
+<pre>AppState/logs/check-in
+  -> readiness/progression engines
+  -> planner
+  -> Home/Train/Log</pre>
+<p>Prevent double readiness adjustment, fallback readiness in production, and planner/legacy mismatch on recovery/deload days.</p>
+
+<h3>Phase 27H — Full Runtime Shadow Trial</h3>
+<p>Run planner and legacy side by side across all 84 seed days, readiness states, progression modes, deload metadata, duration runs, long runs, lift days, conditioning days, core support days, hybrid/mixed days, and logged/completed states.</p>
+<p>Promotion gate should require zero critical logging mismatches, zero source-of-truth conflicts, zero persistence regressions, and documented expected differences only.</p>
+
+<h3>Phase 28A — Feature-flagged Planner Runtime Pilot</h3>
+<p>Use a hard feature flag: <code>plannerRuntimeEnabled</code>. Preserve legacy fallback, avoid data migration without backup, compare planner-vs-legacy runtime outputs, capture mismatches, and allow rollback.</p>
+
+<h3>Phase 28B — Promotion Decision</h3>
+<p>Promote only if Home uses planner, Train uses planner, Log uses planner logging targets, recommendations are reconciled, readiness/progression sequence is fixed, persistence/backup/rollback are proven, and shadow trial has no critical blockers.</p>
+
+<h2>14. Final recommendation</h2>
+<div class="note">
+<p><strong>Do not promote planner yet.</strong></p>
+<p>The planner is strong enough to continue as a developer-only advisory/shadow system, but it is not yet safe to replace the legacy training engine.</p>
+<p><strong>Recommended next phase:</strong> Phase 27B — Planner Promotion Contract V1.</p>
+<p>That phase should be audit/design-only and should define the exact promotion contract before any runtime integration changes.</p>
+</div>
+</body>
+</html>

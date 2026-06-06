@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildHomeCommandCenter } from "./home-command-center";
-import type { AppState, MacroTarget } from "./types";
+import { buildHomeCommandCenter, getScheduledRunForTraining, getTodayRunForDate } from "./home-command-center";
+import { evaluateTraining } from "./training-engine";
+import type { AppState, MacroTarget, Workout } from "./types";
 
 const userId = "user-1";
 const macroTarget: MacroTarget = { id: "macro-1", userId, week: 1, calories: 2550, protein: 220, carbs: 210, fat: 70, fiber: 30, water: 120 };
@@ -82,11 +83,11 @@ function model(overrides: Partial<AppState> = {}, today = "2026-06-01") {
     today,
     readinessStatus: "Green",
     todaysWorkout: "Upper Strength",
-    todaysRun: "Hold: 3 mi",
+    todaysRun: "No run scheduled today",
     macroTarget,
     coachRecommendation: "Do Upper Strength today with controlled reps. This extra explanation should not become a long report.",
     workoutDurationMinutes: 55,
-    runDurationMinutes: 30,
+    runDurationMinutes: 0,
   });
 }
 
@@ -95,7 +96,7 @@ test("builds action-focused Home command center metrics", () => {
 
   assert.equal(result.readinessStatus, "Green");
   assert.equal(result.todaysWorkout, "Upper Strength");
-  assert.equal(result.todaysRun, "Hold: 3 mi");
+  assert.equal(result.todaysRun, "No run scheduled today");
   assert.equal(result.currentWeight, 209.8);
   assert.equal(result.caloriesRemaining, 650);
   assert.equal(result.weeklyMiles, 6);
@@ -205,6 +206,165 @@ test("summarizes today's training without recalculating training plan", () => {
   assert.equal(result.training.workout.name, "Upper Strength");
   assert.equal(result.training.workout.estimatedDurationMinutes, 55);
   assert.equal(result.training.workout.status, "Completed");
-  assert.equal(result.training.run.name, "Hold: 3 mi");
-  assert.equal(result.training.run.estimatedDurationMinutes, 30);
+  assert.equal(result.training.run.name, "No run scheduled today");
+  assert.equal(result.training.run.estimatedDurationMinutes, 0);
+});
+
+const runWorkout = (dayIndex: number, title: string, type: string, reps: string, optional = false): Workout => ({
+  id: `run-${dayIndex}`,
+  userId,
+  week: 1,
+  phase: "Test",
+  day: "Test",
+  dayIndex,
+  title,
+  type: optional ? `${type} optional` : type,
+  notes: optional ? "Optional shakeout run" : "Scheduled run",
+  longRunMiles: /long/i.test(type) ? Number(reps.match(/[\d.]+/)?.[0] ?? 0) : undefined,
+  exercises: [{ id: `run-${dayIndex}-e1`, workoutId: `run-${dayIndex}`, order: 1, name: title, prescribedSets: 1, prescribedReps: reps, prescribedRpe: 6, category: "conditioning" }],
+});
+
+const liftWorkout = (dayIndex: number, title = "Lift Day"): Workout => ({
+  id: `lift-${dayIndex}`,
+  userId,
+  week: 1,
+  phase: "Test",
+  day: "Test",
+  dayIndex,
+  title,
+  type: "upper-strength",
+  notes: "No run scheduled",
+  exercises: [{ id: `lift-${dayIndex}-e1`, workoutId: `lift-${dayIndex}`, order: 1, name: "Bench Press", prescribedSets: 3, prescribedReps: "8", prescribedRpe: 8, category: "compound-upper" }],
+});
+
+const weeklyRunSchedule: Workout[] = [
+  liftWorkout(0, "Monday Lift"),
+  runWorkout(1, "Tuesday Easy Run", "easy-run", "3 miles"),
+  liftWorkout(2, "Wednesday Lift"),
+  runWorkout(3, "Thursday Tempo Run", "tempo-run", "4 miles"),
+  liftWorkout(4, "Friday Lift"),
+  runWorkout(5, "Saturday Optional Shakeout", "easy-run", "2 miles", true),
+  runWorkout(6, "Sunday Long Run", "long-run", "6 miles"),
+];
+
+test("today run helper does not return stale Hold: 3 mi every day", () => {
+  const monday = getTodayRunForDate({ today: "2026-06-01", currentWeek: 1, workouts: weeklyRunSchedule, staleRunLabel: "Hold: 3 mi" });
+  const tuesday = getTodayRunForDate({ today: "2026-06-02", currentWeek: 1, workouts: weeklyRunSchedule, staleRunLabel: "Hold: 3 mi" });
+
+  assert.equal(monday, null);
+  assert.equal(tuesday?.label, "Tuesday Easy Run — 3 mi");
+});
+
+test("Monday with no planned run returns no required run", () => {
+  assert.equal(getTodayRunForDate({ today: "2026-06-01", currentWeek: 1, workouts: weeklyRunSchedule }), null);
+});
+
+test("Tuesday with scheduled run returns the correct Tuesday run", () => {
+  const result = getTodayRunForDate({ today: "2026-06-02", currentWeek: 1, workouts: weeklyRunSchedule });
+
+  assert.equal(result?.label, "Tuesday Easy Run — 3 mi");
+  assert.equal(result?.required, true);
+  assert.equal(result?.dayIndex, 1);
+});
+
+test("Thursday with scheduled run returns the correct Thursday run", () => {
+  const result = getTodayRunForDate({ today: "2026-06-04", currentWeek: 1, workouts: weeklyRunSchedule });
+
+  assert.equal(result?.label, "Thursday Tempo Run — 4 mi");
+  assert.equal(result?.type, "tempo");
+});
+
+test("Saturday optional run is labeled optional", () => {
+  const result = getTodayRunForDate({ today: "2026-06-06", currentWeek: 1, workouts: weeklyRunSchedule });
+
+  assert.equal(result?.label, "Optional: Saturday Optional Shakeout — 2 mi");
+  assert.equal(result?.required, false);
+});
+
+test("Sunday long run is shown only on Sunday", () => {
+  const saturday = getTodayRunForDate({ today: "2026-06-06", currentWeek: 1, workouts: weeklyRunSchedule });
+  const sunday = getTodayRunForDate({ today: "2026-06-07", currentWeek: 1, workouts: weeklyRunSchedule });
+
+  assert.doesNotMatch(saturday?.label ?? "", /Sunday Long Run/);
+  assert.equal(sunday?.label, "Sunday Long Run — 6 mi");
+  assert.equal(sunday?.type, "long");
+});
+
+test("missing run data produces a safe empty state instead of Hold: 3 mi", () => {
+  const result = getTodayRunForDate({ today: "2026-06-02", currentWeek: 1, workouts: [liftWorkout(1, "Tuesday Lift")], staleRunLabel: "Hold: 3 mi" });
+
+  assert.equal(result, null);
+});
+
+test("old localStorage or state stale run label does not override date-aware recommendation", () => {
+  const result = getTodayRunForDate({ today: "2026-06-01", currentWeek: 1, workouts: weeklyRunSchedule, staleRunLabel: "Hold: 3 mi" });
+
+  assert.equal(result, null);
+});
+
+test("Home UI model consumes corrected run display model", () => {
+  const result = buildHomeCommandCenter(state(), {
+    today: "2026-06-01",
+    readinessStatus: "Green",
+    todaysWorkout: "Monday Lift",
+    todaysRun: "No run scheduled today",
+    macroTarget,
+    coachRecommendation: "Do Monday Lift today.",
+    scheduledWorkout: liftWorkout(0, "Monday Lift"),
+    scheduledRun: null,
+    runDurationMinutes: 0,
+  });
+
+  assert.equal(result.todaysRun, "No run scheduled today");
+  assert.equal(result.training.run.name, "No run scheduled today");
+  assert.equal(result.training.run.estimatedDurationMinutes, 0);
+  assert.doesNotMatch(result.training.run.name, /Hold: 3 mi/);
+});
+
+test("Train consumes the same date-aware no-run model as Home on non-run days", () => {
+  const todayRun = getTodayRunForDate({ today: "2026-06-01", currentWeek: 1, workouts: weeklyRunSchedule, staleRunLabel: "Hold: 3 mi" });
+  const scheduledRun = getScheduledRunForTraining(todayRun, "Hold: 3 mi");
+  const result = evaluateTraining({
+    currentDate: "2026-06-01",
+    trainingPlan: null,
+    selectedWeek: 1,
+    selectedDay: 0,
+    readinessResult: { score: 88, status: "Green", confidence: "High", reasons: [], reason: "Green readiness", recommendation: "Train normally", recommendationType: "full_training", trainingGuidance: "Full session", recoveryGuidance: [], dataQualityWarnings: [] },
+    progressionResult: { weeklyDecision: "Progress", nutritionDecision: "Maintain Calories", goalStatus: { "Fat Loss": "On Track", Physique: "On Track", Strength: "On Track", "Half Marathon": "On Track" }, reasons: [], warnings: [], auditEntries: [], confidence: "High", dataQuality: { score: 90, confidence: "High", missingInputs: [], penalties: [], warnings: [] } },
+    goalTrackingResult: { overallStatus: "On Track", overallScore: 86, confidence: "High", dataQualityScore: 88, goals: {} as any, priorityGoal: "half_marathon", summary: "Goals on track", recommendations: [], warnings: [], explanations: [], auditTrail: [] },
+    scheduledWorkout: liftWorkout(0, "Monday Lift"),
+    scheduledRun,
+    availableMinutes: 90,
+    userPreferences: { includeWarmup: true, includeCooldown: true },
+  });
+
+  assert.equal(scheduledRun, null);
+  assert.equal(result.run, null);
+  assert.equal(result.todayPlan.some((block) => block.kind === "run"), false);
+  assert.doesNotMatch(JSON.stringify(result), /Hold: 3 mi/);
+});
+
+test("Train shows Tuesday and Thursday scheduled runs only from the date-aware model", () => {
+  const tuesdayRun = getScheduledRunForTraining(getTodayRunForDate({ today: "2026-06-02", currentWeek: 1, workouts: weeklyRunSchedule }));
+  const thursdayRun = getScheduledRunForTraining(getTodayRunForDate({ today: "2026-06-04", currentWeek: 1, workouts: weeklyRunSchedule }));
+
+  assert.equal(tuesdayRun?.title, "Tuesday Easy Run — 3 mi");
+  assert.equal(tuesdayRun?.distanceMiles, 3);
+  assert.equal(thursdayRun?.title, "Thursday Tempo Run — 4 mi");
+  assert.equal(thursdayRun?.distanceMiles, 4);
+});
+
+test("Train long run comes from Sunday only when scheduled", () => {
+  const saturdayRun = getScheduledRunForTraining(getTodayRunForDate({ today: "2026-06-06", currentWeek: 1, workouts: weeklyRunSchedule }));
+  const sundayRun = getScheduledRunForTraining(getTodayRunForDate({ today: "2026-06-07", currentWeek: 1, workouts: weeklyRunSchedule }));
+
+  assert.doesNotMatch(saturdayRun?.title ?? "", /Sunday Long Run/);
+  assert.equal(sundayRun?.title, "Sunday Long Run — 6 mi");
+  assert.equal(sundayRun?.type, "long");
+});
+
+test("today run helper is deterministic", () => {
+  const input = { today: "2026-06-04", currentWeek: 1, workouts: weeklyRunSchedule };
+
+  assert.deepEqual(getTodayRunForDate(input), getTodayRunForDate(input));
 });

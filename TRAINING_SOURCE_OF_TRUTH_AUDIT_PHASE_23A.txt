@@ -1,0 +1,491 @@
+PHASE 23A — TRAINING SOURCE OF TRUTH AUDIT V1
+Generated: June 4, 2026
+Repo: /Users/walterelrafie/macro-workout-coach
+
+Scope
+- Audit only.
+- No new features.
+- No UI changes.
+- No canonical engine changes.
+- No Training Planner changes.
+
+Repo state observed before PDF generation
+Modified:
+- src/app/page.tsx
+- src/lib/home-command-center.test.ts
+- src/lib/home-command-center.ts
+
+Untracked:
+- TRAINING_PLANNER_ARCHITECTURE_V1.md
+- src/lib/training-planner.test.ts
+- src/lib/training-planner.ts
+
+EXECUTIVE SUMMARY
+
+The application currently has multiple competing training sources of truth:
+
+1. src/lib/training-planner.ts
+   - New canonical Phase 22 source.
+   - Not wired yet.
+
+2. src/app/page.tsx
+   - Independently computes today’s workout, today’s run, planned distance, scheduled run, daily prescription, completion state, and Train display state.
+
+3. src/lib/home-command-center.ts
+   - Independently derives today’s run, run distance/duration, Home training model, Home completion status, and calls legacy evaluateTraining().
+
+4. src/lib/training-engine.ts
+   - Legacy session composer.
+   - Creates warmup/workout/run/cooldown blocks, status, duration, warnings, priorities.
+   - Overlaps heavily with DailyTrainingSession.
+
+5. src/lib/coach-engine.ts
+   - Legacy recommendation generator.
+   - Creates daily workout prescription, running recommendation, readiness-adjusted workout, next-set and post-workout recommendations.
+
+6. src/lib/seed-data.ts
+   - Current plan data and fallback workout selector.
+   - Contains hardcoded 12-week schedule, run/mobility prescriptions embedded as workout exercises, and fallback to workouts[0].
+
+7. src/app/page.tsx Train UI + run logger
+   - Uses TrainingEngineResult, scheduledRun, and plannedRunDistance.
+   - Contains defaulting logic that can turn run duration/distance assumptions into logging defaults.
+
+Observed bug paths
+- Repeated “Hold: 3 mi”: page.tsx passes staleRunLabel: "Hold: 3 mi" into getTodayRunForDate(), then nextRunLabel and getScheduledRunForTraining() can carry that label forward.
+- Home and Train disagreeing: Home receives homeCommandCenter.trainingEngineResult, while Train also has an internal fallback evaluateTraining() call with different fake/default progression and goal inputs.
+- Run duration becoming reps: seed workouts encode "35-45 min" as Exercise.prescribedReps; legacy engines parse/filter this text differently.
+- Mobility interpreted as workouts: seed data encodes mobility as exercises; legacy lift detection often means anything not run/walk/sprint/interval.
+- Duplicate logging/completion behavior: Train creates workout sessions directly in page.tsx; run logging is separate via TrainRunLogger -> saveTrainRunLog(); completion is independently derived by Home, Train, Daily Check-In, and Weekly Review.
+
+CATEGORY A — MUST BE MIGRATED
+
+These are current sources that generate, transform, infer, or display daily training and should eventually consume or derive from DailyTrainingSession.
+
+1. src/app/page.tsx — Home() daily derivation block, approx lines 146-176
+Purpose: Computes today’s date mapping, today’s workout, adjusted workout, today’s run, planned run distance, running recommendation, next run label, scheduled run, daily prescription, and Home command center model.
+Current sources: getWorkoutForWeekDay(), getTodayRunForDate(), generateRunningRecommendation(), getScheduledRunForTraining(), generateDailyPrescription(), adjustWorkoutForReadiness(), buildHomeCommandCenter().
+Consumes: state.currentWeek, selectedWeek, todayIso(), workouts, latest check-in/readiness, run logs/trends, macro targets, post-workout recommendations.
+Produces: todayPlanDayIndex, todayWorkout, adjustedTodayWorkout, todayRunDisplay, plannedRunDistance, runningRecommendation, nextRunLabel, scheduledRunForTraining, dailyPrescription, homeCommandCenter.
+Replace with: DailyTrainingSession.
+Priority: P0.
+
+2. src/app/page.tsx — todayPlanDayIndex, approx lines 148-151
+Purpose: Maps date to Monday=0/Sunday=6.
+Current source: local inline date mapping.
+Replace with: DailyTrainingSession.dayIndex.
+Priority: P0.
+
+3. src/app/page.tsx — todayWorkout, approx line 155
+Purpose: Selects today’s workout from state.currentWeek + todayPlanDayIndex.
+Current source: getWorkoutForWeekDay().
+Replace with: DailyTrainingSession.sourcePlan + DailyTrainingSession.workout.
+Priority: P0.
+
+4. src/app/page.tsx — adjustedTodayWorkout, approx line 157
+Purpose: Applies readiness modification to today’s workout.
+Current source: adjustWorkoutForReadiness().
+Replace with: DailyTrainingSession.status, modifications, workout, recovery.
+Priority: P0.
+
+5. src/app/page.tsx — todayRunDisplay, approx line 170
+Purpose: Determines whether today has a run and creates display object.
+Current source: getTodayRunForDate().
+Consumes staleRunLabel: "Hold: 3 mi".
+Replace with: DailyTrainingSession.run.
+Priority: P0.
+
+6. src/app/page.tsx — plannedRunDistance, approx line 171
+Purpose: Converts today’s run display into numeric distance.
+Current source: todayRunDisplay?.distanceMiles ?? 0.
+Replace with: DailyTrainingSession.run.loggingTarget.plannedDistance.
+Priority: P0.
+
+7. src/app/page.tsx — runningRecommendation, approx line 172
+Purpose: Generates run recommendation based on planned distance and run logs.
+Current source: generateRunningRecommendation().
+Replace with: DailyTrainingSession.run plus advisory engine input.
+Priority: P0/P1 depending on adapter design.
+
+8. src/app/page.tsx — nextRunLabel, approx line 173
+Purpose: Creates displayed run label, including Hold/Progress/etc.
+Current source: todayRunDisplay + runningRecommendation.
+Replace with: DailyTrainingSession.run.title or summary.runName.
+Priority: P0.
+
+9. src/app/page.tsx — scheduledRunForTraining, approx line 174
+Purpose: Converts run display/recommendation into scheduled run for Training Engine.
+Current source: getScheduledRunForTraining().
+Replace with: DailyTrainingSession.run.loggingTarget.
+Priority: P0.
+
+10. src/app/page.tsx — dailyPrescription, approx line 175
+Purpose: Legacy full daily coach prescription.
+Current source: generateDailyPrescription().
+Replace training-specific fields with DailyTrainingSession; keep nutrition advice separate.
+Priority: P0 for training content.
+
+11. src/app/page.tsx — homeCommandCenter, approx line 176
+Purpose: Builds Home model and Home training display.
+Current source: buildHomeCommandCenter() fed with adjustedTodayWorkout, nextRunLabel, scheduledRunForTraining, dailyPrescription.
+Replace with: Home adapter consuming DailyTrainingSession.
+Priority: P0.
+
+12. src/app/page.tsx — TrainScreen()/TrainingPlan(), approx lines 337-747
+Purpose: Displays and executes current training session.
+Current sources: trainingEngineResult, workout prop, scheduledRun, fallback evaluateTraining().
+Produces: visible Train blocks, lift/run scheduled flags, workout session start, run logger display, training completion status.
+Replace with: DailyTrainingSession.
+Priority: P0.
+
+13. src/app/page.tsx — TrainingPlan() fallback evaluateTraining(), approx lines 658-670
+Purpose: Creates internal fallback TrainingEngineResult if not provided.
+Current source: inline evaluateTraining() call with fake progression/goal tracking objects.
+Replace/remove after planner adapter.
+Priority: P0.
+
+14. src/app/page.tsx — TrainingPlan() display flags, approx lines 671-681
+Purpose: Derives blocks, lift/run scheduled flags, active session, completion status.
+Current source: trainingEngineResult.todayPlan/workout/run plus logs.
+Replace with: DailyTrainingSession.blocks, loggingTarget, completion adapter.
+Priority: P0.
+
+15. src/app/page.tsx — TrainingPlan.startWorkout(), approx lines 688-706
+Purpose: Creates WorkoutSession for lift block.
+Current source: displayedWorkout.
+Replace with: DailyTrainingSession.workout.loggingTarget.
+Priority: P1.
+
+16. src/app/page.tsx — TrainRunLogger(), approx lines 912-950
+Purpose: Displays run logging form and saves today’s run.
+Current source: plannedDistance, runType, existingRun.
+Issue: defaults duration as Math.round(plannedDistance * 11); duration-only runs cannot be represented correctly.
+Replace with: DailyTrainingSession.run.loggingTarget.
+Priority: P0.
+
+17. src/lib/home-command-center.ts — getTodayRunForDate(), approx lines 201-223
+Purpose: Determines today’s run from current week/date/workouts.
+Current source: seed workouts + local run detection/parsing.
+Replace with: DailyTrainingSession.run.
+Priority: P0.
+
+18. src/lib/home-command-center.ts — milesFromWorkout(), approx lines 155-163
+Purpose: Extracts run distance from Workout.longRunMiles or exercise reps text.
+Current source: text parsing from Workout/Exercise.prescribedReps.
+Replace with: DailyTrainingSession.run.distanceMiles.
+Priority: P0.
+
+19. src/lib/home-command-center.ts — estimatedMinutesFromWorkout(), approx lines 165-174
+Purpose: Derives run estimated duration from distance or prescribedReps regex.
+Replace with: DailyTrainingSession.run.durationMinutes / estimatedDurationMinutes.
+Priority: P0.
+
+20. src/lib/home-command-center.ts — isRunWorkout(), approx lines 189-195
+Purpose: Classifies workout as run.
+Current source: title/type/exercise regex.
+Replace with: DailyTrainingSession.run !== null / blocks.
+Priority: P0.
+
+21. src/lib/home-command-center.ts — getScheduledRunForTraining(), approx lines 225-233
+Purpose: Converts TodayRunDisplay into Training Engine scheduled run.
+Issue: returns null when distanceMiles <= 0, which drops duration-only runs.
+Replace with: DailyTrainingSession.run.loggingTarget.
+Priority: P0.
+
+22. src/lib/home-command-center.ts — buildHomeCommandCenter(), approx lines 388-521
+Purpose: Builds Home dashboard training state and calls legacy Training Engine.
+Produces: todaysWorkout, todaysRun, Home training workout/run, durations, statuses, trainingEngineResult.
+Replace with: Home adapter over DailyTrainingSession.
+Priority: P0.
+
+23. src/lib/home-command-center.ts — completedWorkoutToday()/completedRunToday()
+Purpose: Infers training completion for Home.
+Replace with: DailyTrainingSession-aware completion adapter.
+Priority: P1.
+
+24. src/lib/training-engine.ts — evaluateTraining(), approx lines 186-259
+Purpose: Legacy session composer.
+Consumes: readiness, progression, goal tracking, scheduled workout, scheduled run, preferences.
+Produces: today plan blocks, warmup/workout/run/cooldown, order, duration, priorities, warnings, status, audit trail.
+Replace with: buildDailyTrainingSession().
+Priority: P0.
+
+25. src/lib/training-engine.ts — runDistance(), approx lines 88-92
+Purpose: Derives run distance from scheduled run or Workout.longRunMiles.
+Replace with: DailyTrainingSession.run.distanceMiles.
+Priority: P0.
+
+26. src/lib/training-engine.ts — estimateRunMinutes(), approx lines 105-110
+Purpose: Estimates run minutes from distance.
+Replace with: DailyTrainingSession.run.durationMinutes / estimatedDurationMinutes.
+Priority: P0.
+
+27. src/lib/training-engine.ts — hasLift()/workout block creation, approx lines 85 and 209-216
+Purpose: Classifies and renders workout/lift items.
+Issue: mobility can become workout/lift if not excluded.
+Replace with: DailyTrainingSession.workout and blocks.
+Priority: P0.
+
+28. src/lib/training-engine.ts — buildRecoveryResult(), approx lines 147-168
+Purpose: Creates recovery session from readiness/progression.
+Replace with: DailyTrainingSession.recovery and blocks.
+Priority: P0.
+
+29. src/lib/coach-engine.ts — generateDailyPrescription(), approx lines 746-862
+Purpose: Legacy daily prescription for workout/cardio/nutrition/recovery.
+Replace training/recovery/cardio fields with DailyTrainingSession; keep nutrition target logic separate.
+Priority: P0 for training content.
+
+30. src/lib/coach-engine.ts — generateRunningRecommendation(), approx lines 481-492
+Purpose: Generates running recommendation via Running Engine V2 adapter.
+Keep as advisory input only; planner should own final DailyTrainingSession.run.
+Priority: P1.
+
+31. src/lib/coach-engine.ts — runningEngineResultToLegacyRecommendation(), approx lines 441-479
+Purpose: Converts Running Engine action into legacy run distance/message.
+Issue: creates Hold/Progress distance labels outside canonical session.
+Replace with planner adapter/advisory-only signal.
+Priority: P1.
+
+32. src/lib/coach-engine.ts — adjustWorkoutForReadiness(), approx lines 864-873
+Purpose: Mutates workout based on readiness; can create Recovery Replacement as workout-shaped object.
+Replace with: DailyTrainingSession.status, modifications, recovery.
+Priority: P0.
+
+33. src/lib/seed-data.ts — templateForDay(), approx lines 23-42
+Purpose: Generates hardcoded 12-week workout schedule.
+Current source: static templates with lifts, runs, mobility, recovery stored as exercises.
+Keep as source plan data for now; planner must own interpretation.
+Priority: P0 for interpretation.
+
+34. src/lib/seed-data.ts — workouts, approx lines 44-65
+Purpose: Materializes all week/day workouts.
+Keep as plan source input until structured plan import.
+Priority: P1.
+
+35. src/lib/seed-data.ts — getWorkoutForWeekDay(), approx lines 155-157
+Purpose: Selects workout by week/day with fallback workouts[0].
+Issue: fallback can create incorrect training instead of safe unavailable/rest session.
+Replace with: DailyTrainingSession.sourcePlan.
+Priority: P0.
+
+36. src/lib/run-logger.ts — buildTrainSessionBlocks(), approx lines 231-283
+Purpose: Legacy Train block builder from workout/run distance.
+Replace with: DailyTrainingSession.blocks.
+Priority: P1.
+
+37. src/lib/run-logger.ts — saveTrainRunLog(), approx lines 285-310
+Purpose: Saves run log from Train.
+Keep save function, but input should come from DailyTrainingSession.run.loggingTarget.
+Priority: P1.
+
+38. src/lib/daily-checkin.ts — deriveDailyCompletionStatus(), approx lines 50-57
+Purpose: Derives workout/run completion for Daily Check-In.
+Replace with: adapter comparing logs against DailyTrainingSession logging targets.
+Priority: P1.
+
+CATEGORY B — ADAPTER LAYER ONLY
+
+These should not necessarily be deleted, but should become consumers/adapters around DailyTrainingSession.
+
+1. src/lib/home-command-center.ts — buildHomeCommandCenter()
+Keep as Home model builder, but training fields should adapt from DailyTrainingSession:
+- workout.name <- session.workout?.title
+- run.name <- session.run?.title
+- estimatedDurationMinutes <- session.estimatedDurationMinutes
+- warnings <- session.warnings
+- todaysGoals <- session.todayGoals + nutrition goals
+- trainingEngineResult should eventually disappear or be replaced by planner-backed adapter output.
+
+2. src/app/page.tsx — Dashboard()
+Pure display component. Keep UI; feed it planner-backed Home model.
+
+3. src/lib/home-daily-dashboard.ts
+Display model builder. Safe if fed correct Home command center model.
+
+4. src/app/page.tsx — TrainScreen()
+Thin wrapper. Keep, but pass DailyTrainingSession.
+
+5. src/app/page.tsx — TrainingPlan()
+Keep display/execution UI; change source from TrainingEngineResult to DailyTrainingSession.
+
+6. src/app/page.tsx — TrainRunLogger()
+Keep UI; defaults must come from DailyTrainingSession.run.loggingTarget, including duration-only targets.
+
+7. src/lib/run-logger.ts — buildRunLoggerRecord(), saveRunLoggerEntry(), saveTrainRunLog()
+Keep save/evaluation utilities. Inputs should be planner logging targets.
+
+8. src/lib/workout-logger.ts — buildWorkoutLoggerSession(), saveWorkoutLoggerEntry(), evaluateWorkoutLoggerResult()
+Keep persistence/evaluation utilities. Inputs should be planner workout logging targets.
+
+9. src/app/page.tsx — ActiveWorkout()
+Keep set-by-set execution; feed from planner workout prescription/logging target.
+
+10. src/lib/coach-engine.ts — generateNextSetRecommendation(), generatePostWorkoutAnalysis(), getNextWorkoutStep()
+Keep set-by-set/post-workout execution engines.
+
+11. src/lib/coach-engine.ts — generateRunningRecommendation()
+Keep as advisory input only; do not let it independently create final displayed/scheduled run labels.
+
+12. src/lib/daily-checkin.ts — upsertDailyCheckIn()
+Keep check-in save behavior; completion should come from canonical scheduled-target adapter.
+
+13. src/lib/weekly-review.ts — buildWeeklyReviewSummary()
+Keep as weekly log summary; may later compare logs against planner targets.
+
+14. src/lib/mvp-dashboard.ts — buildMvpDashboard()
+Keep as display model; feed labels from DailyTrainingSession adapter.
+
+15. src/lib/progress-insights-ui.ts
+Keep; may receive planner-aware progression context later.
+
+CATEGORY C — SAFE TO LEAVE ALONE
+
+1. src/lib/training-planner.ts
+New canonical Phase 22 source. Keep.
+
+2. src/lib/readiness-engine.ts
+Canonical readiness signal. Keep.
+
+3. src/lib/progression-engine.ts
+Canonical weekly progression decision. Keep.
+
+4. src/lib/running-engine.ts
+Running progression/readiness engine. Keep as advisory engine.
+
+5. src/lib/workout-engine.ts
+Set/workout progression engine. Keep.
+
+6. src/lib/goal-tracking-engine.ts
+Goal status engine. Keep.
+
+7. src/lib/performance-engine.ts
+Historical performance trend engine. Keep.
+
+8. src/lib/physique-engine.ts
+Physique trend engine. Keep.
+
+9. src/lib/nutrition-engine.ts
+Nutrition decision engine. Keep.
+
+10. src/lib/weekly-review.ts — buildRunningEngineInputForWeeklyReview()
+Weekly running context from logs. Keep.
+
+11. src/lib/race-calendar-engine.ts — evaluateRaceCalendar()
+Race countdown/phase/recommended long-run ranges. Keep; not today’s executable source.
+
+12. src/lib/adaptive-training-calendar-engine.ts — evaluateAdaptiveTrainingCalendar()
+Weekly roadmap targets. Keep; do not let it become daily source of truth.
+
+13. src/lib/race-calendar-ui.ts — buildRaceCalendarUiModel()
+Race roadmap/countdown UI model. Keep.
+
+14. src/lib/storage.ts
+Persistence/date/ID utilities. Keep.
+
+15. src/lib/backup-restore.ts
+Backup/restore safety layer. Keep.
+
+16. src/lib/log-tab-ui.ts
+Log tab metadata/display helper. Keep.
+
+MIGRATION MAP BY APP AREA
+
+Home currently depends on:
+- page.tsx daily derivation block: todayWorkout, adjustedTodayWorkout, todayRunDisplay, plannedRunDistance, runningRecommendation, nextRunLabel, scheduledRunForTraining, dailyPrescription, homeCommandCenter.
+- home-command-center.ts: getTodayRunForDate(), getScheduledRunForTraining(), buildHomeCommandCenter(), legacy evaluateTraining().
+- training-engine.ts: evaluateTraining().
+
+Home should eventually depend on:
+- buildDailyTrainingSession().
+- Home adapter: DailyTrainingSession -> Home command center fields.
+- Nutrition/progression/goal engines remain separate where appropriate.
+
+Train currently depends on:
+- adjusted legacy workout object.
+- scheduled run object.
+- trainingEngineResult.
+- fallback evaluateTraining().
+- direct workout session creation.
+- direct run logging defaults.
+- run-logger save/evaluation.
+- coach-engine set-by-set and post-workout logic.
+
+Train should eventually depend on:
+- DailyTrainingSession.blocks.
+- DailyTrainingSession.workout.
+- DailyTrainingSession.run.
+- DailyTrainingSession.warmup.
+- DailyTrainingSession.cooldown.
+- DailyTrainingSession loggingTarget fields.
+- Keep set-by-set workout execution, run save function, post-workout analysis.
+
+Log currently depends on:
+- deriveDailyCompletionStatus().
+- upsertDailyCheckIn().
+- existing run/workout logs indirectly.
+
+Log should eventually depend on:
+- Completion adapter: DailyTrainingSession + workout/run logs -> scheduled/completed/missed status.
+- Keep Daily Check-In form, nutrition/body/photo logging.
+
+Progress currently depends on:
+- calculateRunTrends().
+- buildWeeklyReviewSummary().
+- buildHomeCommandCenter() with blank workout/run options.
+- buildRaceCalendarUiModel().
+- buildProgressInsightsModel().
+
+Progress should eventually depend on:
+- Mostly keep existing.
+- Replace ProgressScreen call to buildHomeCommandCenter(... todaysWorkout: "", todaysRun: "") with planner-backed adapter or non-training engine context builder.
+- Weekly review may later compare logs to DailyTrainingSession targets.
+
+HIGHEST-RISK LEGACY LOGIC TO REPLACE FIRST
+
+1. src/app/page.tsx
+   - todayRunDisplay
+   - plannedRunDistance
+   - nextRunLabel
+   - scheduledRunForTraining
+   - dailyPrescription
+   - homeCommandCenter
+
+2. src/lib/home-command-center.ts
+   - getTodayRunForDate()
+   - getScheduledRunForTraining()
+   - buildHomeCommandCenter() training section
+
+3. src/lib/training-engine.ts
+   - entire evaluateTraining() daily-session composition path
+
+4. src/app/page.tsx
+   - TrainingPlan() fallback evaluateTraining()
+
+5. src/app/page.tsx
+   - TrainRunLogger() defaults based only on planned distance
+
+6. src/lib/seed-data.ts
+   - getWorkoutForWeekDay() fallback to workouts[0]
+
+RECOMMENDED PHASE 23B SCOPE
+
+Phase 23B — Training Planner Adapter V1
+
+Build adapter only. No UI redesign.
+
+Recommended actions:
+- Create a read-only adapter that converts current app state into BuildDailyTrainingSessionInput.
+- Call buildDailyTrainingSession() once for today.
+- Do not remove legacy engines yet.
+- Do not change UI layout yet.
+- Compare adapter output against legacy Home/Train values in tests.
+
+Required test cases:
+- No repeated “Hold: 3 mi”.
+- Duration run remains duration-based.
+- Mobility does not become lift reps.
+- Home and Train receive the same canonical session object.
+- Missing workout is safe rest/unavailable, not workouts[0] fallback.
+
+END OF AUDIT

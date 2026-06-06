@@ -16,7 +16,7 @@ import {
   buildRunTrendCards,
 } from "@/lib/coach-engine";
 import { deriveDailyCompletionStatus, evaluateDailyRecoveryStatus, upsertDailyCheckIn } from "@/lib/daily-checkin";
-import { createInitialState, getWorkoutForWeekDay } from "@/lib/seed-data";
+import { createInitialState, getWorkoutForWeekDay, workouts } from "@/lib/seed-data";
 import { buildWeightTrendDashboard } from "@/lib/weight-trend";
 import { saveTrainRunLog, type TrainRunLogInput } from "@/lib/run-logger";
 import { evaluateTraining, type TrainingEngineResult } from "@/lib/training-engine";
@@ -24,7 +24,7 @@ import { buildNutritionUiV2Model, createMealFromNutritionUiV2ManualEntry, create
 import { buildConfirmedFoodAiMealLog, buildFoodAiMealFromMealLog, buildFoodAiReviewDraft, foodAiMealCategoryToMealLogType, type FoodAiReviewDraft, type FoodAiMode } from "@/lib/food-ai";
 import { buildWeeklyReviewSummary } from "@/lib/weekly-review";
 import { buildCompactAppChrome } from "@/lib/app-chrome";
-import { buildHomeCommandCenter } from "@/lib/home-command-center";
+import { buildHomeCommandCenter, getScheduledRunForTraining, getTodayRunForDate } from "@/lib/home-command-center";
 import { buildHomeDailyDashboard } from "@/lib/home-daily-dashboard";
 import { buildProgressInsightsModel, type ProgressInsightTone } from "@/lib/progress-insights-ui";
 import { buildRaceCalendarUiModel, type RaceCalendarUiModel } from "@/lib/race-calendar-ui";
@@ -37,6 +37,12 @@ import { createAuthAwarePersistenceContext, syncAppStateToSupabase, type AuthPer
 import { buildDataConfidenceNote, buildFoodScanProviderLabel, type DataConfidenceFocus, type DataConfidenceNote } from "@/lib/pre-test-cleanup-ui";
 import { buildBackupDashboardModel, createBackupPayload, LAST_BACKUP_DATE_KEY, parseAndValidateBackupJson, restoreBackupPayload, type BackupValidationResult } from "@/lib/backup-restore";
 import { buildBodyMetricsSummary, buildLogSections, buildPhotoSectionSummary, humanizeDataQualityReason, type LogSectionId } from "@/lib/log-tab-ui";
+import { buildPlannerSessionFromAppState } from "@/lib/training-planner-adapter";
+import { buildHomeTrainingModel, type HomeAdapterResult } from "@/lib/home-adapter";
+import { buildHomeAdapterPilotPreview, isHomeAdapterPilotEnabled, type HomeAdapterPilotPreviewState } from "@/lib/home-adapter-pilot";
+import { buildPlannerShadowObservabilityPanel, toLegacyComparableFromTrainingEngine, type PlannerShadowObservabilityPanel } from "@/lib/planner-shadow-observability";
+import { buildPlannerTrainPreviewPanel, type PlannerTrainPreviewPanel } from "@/lib/planner-train-preview";
+import { buildPlannerTrainScreenV1, shouldRenderLegacyPlannerShadowPanel, type PlannerTrainScreenV1 } from "@/lib/planner-train-screen-v1";
 import { loadRecoveryBackup, loadStateWithRecovery, saveState, todayIso, uid, type StateLoadResult } from "@/lib/storage";
 import type { AppState, CoachDecision, DailyCheckIn, Exercise, FoodScanResult, FormQuality, ProgressPhoto, RunType, SetLog, WorkoutSession } from "@/lib/types";
 
@@ -121,6 +127,8 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState(0);
   const [activeLogSection, setActiveLogSection] = useState<LogSectionId>("checkin");
   const [activeProgressSection, setActiveProgressSection] = useState<ProgressSectionId>("weight");
+  const [plannerDebugEnabled, setPlannerDebugEnabled] = useState(false);
+  const [homeAdapterPilotEnabled, setHomeAdapterPilotEnabled] = useState(false);
   const [persistenceContext, setPersistenceContext] = useState<AuthPersistenceContext | null>(null);
   const [persistenceStatus, setPersistenceStatus] = useState("localStorage fallback");
   const [stateLoadResult, setStateLoadResult] = useState<StateLoadResult | null>(null);
@@ -129,6 +137,12 @@ export default function Home() {
     const result = loadStateWithRecovery();
     setStateLoadResult(result);
     if (result.state) setState(result.state);
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const queryDebugPlanner = new URLSearchParams(window.location.search).get("debugPlanner") === "true";
+    setPlannerDebugEnabled(queryDebugPlanner);
+    setHomeAdapterPilotEnabled(isHomeAdapterPilotEnabled({ search: window.location.search }));
   }, []);
   useEffect(() => { void createAuthAwarePersistenceContext().then(setPersistenceContext).catch(() => setPersistenceContext({ mode: "localStorage", client: null })); }, []);
   useEffect(() => {
@@ -144,10 +158,17 @@ export default function Home() {
   }, [state, persistenceContext]);
 
   const latestCheckIn = useMemo(() => state?.checkIns.at(-1), [state]);
+  const today = todayIso();
+  const todayPlanDayIndex = useMemo(() => {
+    const day = new Date(`${today}T00:00:00.000Z`).getUTCDay();
+    return day === 0 ? 6 : day - 1;
+  }, [today]);
   const baseline = useMemo(() => ({ restingHr: 58, hrv: 60 }), []);
   const readiness = useMemo(() => latestCheckIn ? calculateReadiness(latestCheckIn, baseline) : null, [latestCheckIn, baseline]);
   const currentWorkout = useMemo(() => getWorkoutForWeekDay(selectedWeek, selectedDay), [selectedWeek, selectedDay]);
+  const todayWorkout = useMemo(() => getWorkoutForWeekDay(state?.currentWeek ?? selectedWeek, todayPlanDayIndex), [state?.currentWeek, selectedWeek, todayPlanDayIndex]);
   const adjustedWorkout = useMemo(() => readiness ? adjustWorkoutForReadiness(currentWorkout, readiness.status) : currentWorkout, [currentWorkout, readiness]);
+  const adjustedTodayWorkout = useMemo(() => readiness ? adjustWorkoutForReadiness(todayWorkout, readiness.status) : todayWorkout, [todayWorkout, readiness]);
   const macroTarget = useMemo(() => state?.macroTargets.find((m) => m.week === selectedWeek) ?? state?.macroTargets[0], [state, selectedWeek]);
   const trend = useMemo(() => state ? calculateWeightTrend(state.bodyMetrics) : null, [state]);
   const trainingAdherence = useMemo(() => state?.checkIns.length ? Math.round((state.checkIns.slice(-7).filter((c) => c.workoutCompleted).length / Math.min(7, state.checkIns.length)) * 100) : 0, [state]);
@@ -160,11 +181,13 @@ export default function Home() {
     return buildWeeklyReviewSummary(state, { startDate, endDate });
   }, [state]);
   const runTrends = useMemo(() => state ? calculateRunTrends(state.runLogs ?? []) : null, [state]);
-  const plannedRunDistance = currentWorkout.longRunMiles ?? (currentWorkout.type.includes("run") ? Number(currentWorkout.exercises[0]?.prescribedReps.match(/[\d.]+/)?.[0] ?? 3) : 3);
-  const runningRecommendation = useMemo(() => state && readiness && runTrends ? generateRunningRecommendation({ runLogs: state.runLogs ?? [], nextDayReadiness: readiness.status, plannedDistance: plannedRunDistance, runType: currentWorkout.longRunMiles ? "Long run" : "Zone 2", currentWeeklyMileage: runTrends.weeklyMileage, previousWeeklyMileage: Math.max(0, runTrends.weeklyMileage - plannedRunDistance) }) : null, [state, readiness, runTrends, plannedRunDistance, currentWorkout.longRunMiles]);
-  const nextRunLabel = runningRecommendation ? `${runningRecommendation.action}: ${runningRecommendation.recommendedDistance} mi` : `${plannedRunDistance} mi planned`;
-  const dailyPrescription = useMemo(() => state && latestCheckIn && macroTarget && readiness ? generateDailyPrescription({ readiness, checkIn: latestCheckIn, workout: currentWorkout, macroTarget, nutritionLogs: state.nutritionLogs, bodyMetrics: state.bodyMetrics, trainingAdherence, postWorkoutRecommendations: state.postWorkoutRecommendations, runningRecommendation: runningRecommendation ?? undefined }) : null, [state, latestCheckIn, macroTarget, readiness, currentWorkout, trainingAdherence, runningRecommendation]);
-  const homeCommandCenter = useMemo(() => state && macroTarget && readiness && dailyPrescription ? buildHomeCommandCenter(state, { today: todayIso(), readinessStatus: readiness.status, todaysWorkout: adjustedWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription.exactWorkoutRecommendation, scheduledWorkout: adjustedWorkout, scheduledRun: { type: currentWorkout.longRunMiles ? "long" : "easy", title: nextRunLabel, distanceMiles: runningRecommendation?.recommendedDistance ?? plannedRunDistance } }) : null, [state, macroTarget, readiness, dailyPrescription, adjustedWorkout, currentWorkout.longRunMiles, nextRunLabel, runningRecommendation?.recommendedDistance, plannedRunDistance]);
+  const todayRunDisplay = useMemo(() => state ? getTodayRunForDate({ today, currentWeek: state.currentWeek, workouts, staleRunLabel: "Hold: 3 mi", completedRunDates: (state.runLogs ?? []).filter((run) => run.completed).map((run) => run.date) }) : null, [state, today]);
+  const plannedRunDistance = todayRunDisplay?.distanceMiles ?? 0;
+  const runningRecommendation = useMemo(() => state && readiness && runTrends && todayRunDisplay && plannedRunDistance > 0 ? generateRunningRecommendation({ runLogs: state.runLogs ?? [], nextDayReadiness: readiness.status, plannedDistance: plannedRunDistance, runType: todayRunDisplay.type === "long" ? "Long run" : todayRunDisplay.type === "tempo" ? "Tempo" : todayRunDisplay.type === "speed" ? "Speed" : "Zone 2", currentWeeklyMileage: runTrends.weeklyMileage, previousWeeklyMileage: Math.max(0, runTrends.weeklyMileage - plannedRunDistance) }) : null, [state, readiness, runTrends, todayRunDisplay, plannedRunDistance]);
+  const nextRunLabel = todayRunDisplay ? (runningRecommendation ? `${todayRunDisplay.required ? "" : "Optional: "}${runningRecommendation.action}: ${runningRecommendation.recommendedDistance} mi` : todayRunDisplay.label) : "No run scheduled today";
+  const scheduledRunForTraining = useMemo(() => getScheduledRunForTraining(todayRunDisplay, nextRunLabel, runningRecommendation?.recommendedDistance), [todayRunDisplay, nextRunLabel, runningRecommendation?.recommendedDistance]);
+  const dailyPrescription = useMemo(() => state && latestCheckIn && macroTarget && readiness ? generateDailyPrescription({ readiness, checkIn: latestCheckIn, workout: todayWorkout, macroTarget, nutritionLogs: state.nutritionLogs, bodyMetrics: state.bodyMetrics, trainingAdherence, postWorkoutRecommendations: state.postWorkoutRecommendations, runningRecommendation: runningRecommendation ?? undefined }) : null, [state, latestCheckIn, macroTarget, readiness, todayWorkout, trainingAdherence, runningRecommendation]);
+  const homeCommandCenter = useMemo(() => state && macroTarget && readiness && dailyPrescription ? buildHomeCommandCenter(state, { today, readinessStatus: readiness.status, todaysWorkout: adjustedTodayWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription.exactWorkoutRecommendation, scheduledWorkout: adjustedTodayWorkout, scheduledRun: scheduledRunForTraining, runDurationMinutes: todayRunDisplay?.estimatedMinutes ?? 0 }) : null, [state, macroTarget, readiness, dailyPrescription, today, adjustedTodayWorkout, nextRunLabel, todayRunDisplay?.estimatedMinutes, scheduledRunForTraining]);
   const missionControlContext = useMemo(() => {
     if (!state || !homeCommandCenter) return null;
     const latest = latestBodyMetrics(state);
@@ -204,6 +227,167 @@ export default function Home() {
     return { missionControl };
   }, [state, homeCommandCenter]);
   const missionControl = missionControlContext?.missionControl ?? null;
+  const plannerShadowPanel = useMemo(() => {
+    if (!plannerDebugEnabled || !state || !homeCommandCenter || !readiness) return null;
+    const plannerReadiness = {
+      score: readiness.score,
+      status: readiness.status,
+      confidence: "High" as const,
+      reasons: [],
+      reason: readiness.reason,
+      recommendation: readiness.recommendation,
+      recommendationType: readiness.status === "Green" ? "full_training" as const : readiness.status === "Yellow" ? "modified_training" as const : "recovery_focus" as const,
+      trainingGuidance: readiness.recommendation,
+      recoveryGuidance: [],
+      dataQualityWarnings: [],
+    };
+    const plannerSession = buildPlannerSessionFromAppState({
+      state,
+      date: today,
+      selectedWeek: state.currentWeek,
+      currentWeek: state.currentWeek,
+      workouts,
+      readinessResult: plannerReadiness,
+      progressionResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingResult: homeCommandCenter.goalTrackingEngineResult,
+      runningRecommendation: runningRecommendation ?? null,
+    });
+    return buildPlannerShadowObservabilityPanel({
+      debug: { developerToggle: plannerDebugEnabled },
+      plannerSession,
+      legacy: toLegacyComparableFromTrainingEngine(homeCommandCenter.trainingEngineResult),
+      runtimeOutputs: {
+        runtimeState: state,
+        homeOutput: homeCommandCenter,
+        trainOutput: homeCommandCenter.trainingEngineResult,
+        logOutput: buildLogSections(),
+        recommendations: { dailyPrescription, runningRecommendation },
+      },
+    });
+  }, [state, homeCommandCenter, today, readiness, runningRecommendation, dailyPrescription, plannerDebugEnabled]);
+  const plannerTrainPreviewPanel = useMemo(() => {
+    if (!plannerDebugEnabled || !state || !homeCommandCenter || !readiness) return null;
+    const plannerReadiness = {
+      score: readiness.score,
+      status: readiness.status,
+      confidence: "High" as const,
+      reasons: [],
+      reason: readiness.reason,
+      recommendation: readiness.recommendation,
+      recommendationType: readiness.status === "Green" ? "full_training" as const : readiness.status === "Yellow" ? "modified_training" as const : "recovery_focus" as const,
+      trainingGuidance: readiness.recommendation,
+      recoveryGuidance: [],
+      dataQualityWarnings: [],
+    };
+    const plannerSession = buildPlannerSessionFromAppState({
+      state,
+      date: today,
+      selectedWeek: state.currentWeek,
+      currentWeek: state.currentWeek,
+      workouts,
+      readinessResult: plannerReadiness,
+      progressionResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingResult: homeCommandCenter.goalTrackingEngineResult,
+      runningRecommendation: runningRecommendation ?? null,
+    });
+    return buildPlannerTrainPreviewPanel({
+      debug: { developerToggle: plannerDebugEnabled },
+      plannerSession,
+      runtimeGuards: {
+        state,
+        logs: state,
+        recommendations: { dailyPrescription, runningRecommendation },
+        readiness,
+        progression: homeCommandCenter.progressionEngineResult,
+        homeOutput: homeCommandCenter,
+        trainOutput: homeCommandCenter.trainingEngineResult,
+        logOutput: buildLogSections(),
+      },
+    });
+  }, [state, homeCommandCenter, today, readiness, runningRecommendation, dailyPrescription, plannerDebugEnabled]);
+  const plannerTrainScreenV1 = useMemo(() => {
+    if (!plannerDebugEnabled || !state || !homeCommandCenter || !readiness) return null;
+    const plannerReadiness = {
+      score: readiness.score,
+      status: readiness.status,
+      confidence: "High" as const,
+      reasons: [],
+      reason: readiness.reason,
+      recommendation: readiness.recommendation,
+      recommendationType: readiness.status === "Green" ? "full_training" as const : readiness.status === "Yellow" ? "modified_training" as const : "recovery_focus" as const,
+      trainingGuidance: readiness.recommendation,
+      recoveryGuidance: [],
+      dataQualityWarnings: [],
+    };
+    const plannerSession = buildPlannerSessionFromAppState({
+      state,
+      date: today,
+      selectedWeek: state.currentWeek,
+      currentWeek: state.currentWeek,
+      workouts,
+      readinessResult: plannerReadiness,
+      progressionResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingResult: homeCommandCenter.goalTrackingEngineResult,
+      runningRecommendation: runningRecommendation ?? null,
+    });
+    const legacyComparable = toLegacyComparableFromTrainingEngine(homeCommandCenter.trainingEngineResult);
+    return buildPlannerTrainScreenV1({
+      debug: { developerToggle: plannerDebugEnabled },
+      plannerSession,
+      legacySession: { sessionType: legacyComparable.sessionType, warnings: homeCommandCenter.trainingEngineResult.warnings.map((warning) => warning.message) },
+      runtimeGuards: {
+        state,
+        logs: state,
+        recommendations: { dailyPrescription, runningRecommendation },
+        readiness,
+        progression: homeCommandCenter.progressionEngineResult,
+        homeOutput: homeCommandCenter,
+        trainOutput: homeCommandCenter.trainingEngineResult,
+        logOutput: buildLogSections(),
+      },
+    });
+  }, [state, homeCommandCenter, today, readiness, runningRecommendation, dailyPrescription, plannerDebugEnabled]);
+  const homeAdapterPilotPreview = useMemo<HomeAdapterPilotPreviewState>(() => {
+    if (!homeAdapterPilotEnabled) return buildHomeAdapterPilotPreview({ enabled: false, adapterResult: null });
+    if (!state || !homeCommandCenter || !readiness || !dailyPrescription) return buildHomeAdapterPilotPreview({ enabled: true, adapterResult: null });
+    const plannerReadiness = {
+      score: readiness.score,
+      status: readiness.status,
+      confidence: "High" as const,
+      reasons: [],
+      reason: readiness.reason,
+      recommendation: readiness.recommendation,
+      recommendationType: readiness.status === "Green" ? "full_training" as const : readiness.status === "Yellow" ? "modified_training" as const : "recovery_focus" as const,
+      trainingGuidance: readiness.recommendation,
+      recoveryGuidance: [],
+      dataQualityWarnings: [],
+    };
+    const plannerSession = buildPlannerSessionFromAppState({
+      state,
+      date: today,
+      selectedWeek: state.currentWeek,
+      currentWeek: state.currentWeek,
+      workouts,
+      readinessResult: plannerReadiness,
+      progressionResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingResult: homeCommandCenter.goalTrackingEngineResult,
+      runningRecommendation: runningRecommendation ?? null,
+    });
+    const adapterResult: HomeAdapterResult = buildHomeTrainingModel({
+      mode: "pilot",
+      requestDate: today,
+      session: plannerSession,
+      readinessResult: plannerReadiness,
+      progressionResult: homeCommandCenter.progressionEngineResult,
+      goalTrackingResult: homeCommandCenter.goalTrackingEngineResult,
+      recommendation: { coachRecommendation: dailyPrescription.exactWorkoutRecommendation, runningRecommendation: runningRecommendation ?? null },
+      workoutSessions: state.workoutSessions,
+      runLogs: state.runLogs,
+      auditHash: `audit-hash-${plannerSession.id}`,
+      provenance: { source: "home-adapter-pilot", plannerVersion: "developer-only", adapterVersion: "home-adapter-v1" },
+    });
+    return buildHomeAdapterPilotPreview({ enabled: true, adapterResult });
+  }, [homeAdapterPilotEnabled, state, homeCommandCenter, readiness, dailyPrescription, today, runningRecommendation]);
   useEffect(() => {
     if (!state || !dailyPrescription || !readiness || !latestCheckIn) return;
     const day = dailyPrescription.date.slice(0, 10);
@@ -252,6 +436,13 @@ export default function Home() {
 
   const updateState = (next: AppState) => setState(next);
   const appChrome = buildCompactAppChrome({ currentWeek: selectedWeek });
+  const showLegacyPlannerShadowPanel = shouldRenderLegacyPlannerShadowPanel({
+    plannerDebugEnabled,
+    legacyShadowPanelVisible: Boolean(plannerShadowPanel?.visible),
+    plannerTrainScreenV1Visible: Boolean(plannerTrainScreenV1?.visible),
+    activeScreen: active,
+  });
+
   return <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#3f2f12,transparent_30%),linear-gradient(135deg,#050505,#111111_50%,#050505)] text-zinc-100">
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
       <header className="sticky top-0 z-20 -mx-4 border-b border-white/10 bg-black/85 px-4 py-1.5 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
@@ -263,14 +454,103 @@ export default function Home() {
       </header>
 
       <div className="py-2">
-        {active === "Home" && <Dashboard model={homeCommandCenter} missionControl={missionControl} onStartWorkout={() => setActive("Train")} />}
-        {active === "Train" && <TrainScreen state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={adjustedWorkout} originalWorkout={currentWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} runTrends={runTrends} plannedRunDistance={plannedRunDistance} trainingEngineResult={homeCommandCenter.trainingEngineResult} />}
+        {active === "Home" && <Dashboard model={homeCommandCenter} missionControl={missionControl} homeAdapterPilotPreview={homeAdapterPilotPreview} onStartWorkout={() => setActive("Train")} />}
+        {active === "Train" && <TrainScreen state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={adjustedWorkout} originalWorkout={currentWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} runTrends={runTrends} plannedRunDistance={plannedRunDistance} scheduledRun={scheduledRunForTraining} trainingEngineResult={homeCommandCenter.trainingEngineResult} plannerTrainPreviewPanel={plannerTrainPreviewPanel} plannerTrainScreenV1={plannerTrainScreenV1} />}
         {active === "Log" && <LogScreen state={state} updateState={updateState} readiness={readiness} trend={trend} section={activeLogSection} setSection={setActiveLogSection} />}
         {active === "Progress" && <ProgressScreen state={state} updateState={updateState} weeklyReview={weeklyReview} section={activeProgressSection} setSection={setActiveProgressSection} />}
         {active === "More" && <MoreScreen state={state} updateState={updateState} />}
+        {showLegacyPlannerShadowPanel && plannerShadowPanel && <PlannerShadowDeveloperPanel panel={plannerShadowPanel} />}
       </div>
     </div>
   </main>;
+}
+
+function PlannerShadowDeveloperPanel({ panel }: { panel: PlannerShadowObservabilityPanel }) {
+  if (!panel.visible || !panel.comparison) return null;
+  return <aside className="mt-4 rounded-3xl border border-fuchsia-300/30 bg-fuchsia-950/20 p-4 text-xs text-fuchsia-50" data-testid="planner-shadow-developer-panel" aria-label="Planner Shadow Comparison">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <p className="font-black uppercase tracking-[0.24em] text-fuchsia-200">Developer only · read only</p>
+        <h2 className="mt-1 text-lg font-black text-white">{panel.title}</h2>
+      </div>
+      <span className="rounded-full border border-fuchsia-200/30 px-3 py-1 font-black uppercase tracking-[0.16em] text-fuchsia-100">Advisory only</span>
+    </div>
+    <dl className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      {panel.rows.map((row) => <div key={row.label} className="rounded-2xl border border-white/10 bg-black/25 p-3">
+        <dt className="text-[10px] font-black uppercase tracking-[0.16em] text-fuchsia-200/80">{row.label}</dt>
+        <dd className="mt-1 break-words font-bold text-white">{row.value}</dd>
+      </div>)}
+    </dl>
+    {panel.comparison.mismatches.length ? <div className="mt-3 rounded-2xl border border-white/10 bg-black/25 p-3">
+      <p className="font-black uppercase tracking-[0.16em] text-fuchsia-200/80">Mismatches</p>
+      <ul className="mt-2 grid gap-1 text-zinc-200">
+        {panel.comparison.mismatches.map((mismatch) => <li key={mismatch.id}>{mismatch.severity}: {mismatch.field} · legacy {String(mismatch.legacyValue ?? "None")} vs planner {String(mismatch.plannerValue ?? "None")}</li>)}
+      </ul>
+    </div> : null}
+  </aside>;
+}
+
+function PlannerTrainScreenV1DeveloperPanel({ screen }: { screen: PlannerTrainScreenV1 }) {
+  if (!screen.visible) return null;
+  return <section className="rounded-3xl border border-sky-300/30 bg-zinc-950/90 p-4 text-white shadow-2xl shadow-black/30" data-testid="planner-train-screen-v1" aria-label="PlannerTrainScreenV1">
+    <div className="rounded-3xl border border-sky-300/20 bg-sky-400/10 p-5">
+      <p className="text-xs font-black uppercase tracking-[0.25em] text-sky-200">Developer only · read only · advisory preview</p>
+      <h2 className="mt-2 text-3xl font-black">{screen.topCard.title}</h2>
+      <div className="mt-4 grid gap-3 sm:grid-cols-4">
+        <Stat label="Session Type" value={screen.topCard.sessionType} tone="green" />
+        <Stat label="Primary Objective" value={screen.topCard.primaryObjective} />
+        <Stat label="Estimated Duration" value={screen.topCard.estimatedDuration} />
+        <Stat label="Stress Rating" value={screen.topCard.stressRating} />
+      </div>
+    </div>
+    <Card className="mt-4" eyebrow="Primary Prescription" title={screen.primaryPrescription.title}>
+      <p className="rounded-2xl bg-black/20 p-3 text-sm font-black text-sky-100">Primary: {screen.primaryPrescription.kind}</p>
+      {screen.primaryPrescription.details.length ? <div className="mt-3 grid gap-2">{screen.primaryPrescription.details.map((item) => <p key={item} className="rounded-xl border border-white/10 bg-white/[0.03] p-3 text-sm text-zinc-200">{item}</p>)}</div> : <p className="mt-3 text-sm text-zinc-400">No primary work required.</p>}
+    </Card>
+    {screen.supportWork.length ? <Card className="mt-4" eyebrow="Support Work" title="Support work stays separate from primary work">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {screen.supportWork.map((item) => <div key={`${item.kind}-${item.title}`} className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+          <p className="text-xs font-black uppercase tracking-[0.18em] text-zinc-400">Support: {item.kind}</p>
+          <p className="mt-1 font-black text-white">{item.title}</p>
+          {item.items.length ? <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-zinc-300">{item.items.map((entry) => <li key={entry}>{entry}</li>)}</ul> : null}
+        </div>)}
+      </div>
+    </Card> : null}
+    <Card className="mt-4" eyebrow="Logging" title="Required logging only">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {screen.logging.showRunLogging ? <Stat label="Run Logging" value="Required" tone="green" /> : <Stat label="Run Logging" value="Hidden" tone="neutral" />}
+        {screen.logging.showLiftLogging ? <Stat label="Lift Logging" value="Required" tone="green" /> : <Stat label="Lift Logging" value="Hidden" tone="neutral" />}
+      </div>
+    </Card>
+    <details className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4 text-sm text-zinc-300">
+      <summary className="cursor-pointer font-black text-zinc-100">Developer comparison</summary>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <Stat label="Legacy Session" value={screen.comparison.legacySession} />
+        <Stat label="Planner Session" value={screen.comparison.plannerSession} />
+        <Stat label="Match" value={screen.comparison.match ? "Yes" : "No"} tone={screen.comparison.match ? "green" : "yellow"} />
+        <Stat label="Warnings" value={screen.comparison.warnings.join(" | ") || "None"} />
+      </div>
+    </details>
+  </section>;
+}
+
+function PlannerTrainPreviewDeveloperPanel({ panel }: { panel: PlannerTrainPreviewPanel }) {
+  if (!panel.visible || !panel.preview) return null;
+  return <aside className="mt-4 rounded-3xl border border-sky-300/30 bg-sky-950/20 p-4 text-xs text-sky-50" data-testid="planner-train-preview-panel" aria-label="Planner Train Preview">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <p className="font-black uppercase tracking-[0.24em] text-sky-200">Developer only · read only</p>
+        <h2 className="mt-1 text-lg font-black text-white">{panel.title}</h2>
+      </div>
+      <span className="rounded-full border border-sky-200/30 px-3 py-1 font-black uppercase tracking-[0.16em] text-sky-100">Advisory only</span>
+    </div>
+    <dl className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      {panel.rows.map((row) => <div key={row.label} className="rounded-2xl border border-white/10 bg-black/25 p-3">
+        <dt className="text-[10px] font-black uppercase tracking-[0.16em] text-sky-200/80">{row.label}</dt>
+        <dd className="mt-1 break-words font-bold text-white">{row.value}</dd>
+      </div>)}
+    </dl>
+  </aside>;
 }
 
 function RecoveryScreen({ result, onRestoreSnapshot, onRestorePreRestore, onContinueFresh }: { result: Extract<StateLoadResult, { status: "corrupt" }>; onRestoreSnapshot: () => void; onRestorePreRestore: () => void; onContinueFresh: () => void }) {
@@ -288,7 +568,7 @@ function RecoveryScreen({ result, onRestoreSnapshot, onRestorePreRestore, onCont
   </main>;
 }
 
-function Dashboard({ model, missionControl, onStartWorkout }: { model: ReturnType<typeof buildHomeCommandCenter>; missionControl: MissionControlUiModel; onStartWorkout: () => void }) {
+function Dashboard({ model, missionControl, homeAdapterPilotPreview, onStartWorkout }: { model: ReturnType<typeof buildHomeCommandCenter>; missionControl: MissionControlUiModel; homeAdapterPilotPreview: HomeAdapterPilotPreviewState; onStartWorkout: () => void }) {
   const dailyDashboard = buildHomeDailyDashboard({ home: model, missionControl });
   const sectionTone = (label: string, value: string) => {
     if (label === "Recovery status") return value.includes("Green") ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : value.includes("Red") ? "border-red-300/25 bg-red-300/10 text-red-100" : "border-amber-300/25 bg-amber-300/10 text-amber-100";
@@ -322,11 +602,25 @@ function Dashboard({ model, missionControl, onStartWorkout }: { model: ReturnTyp
     </details>
 
     <button type="button" onClick={onStartWorkout} className="rounded-xl bg-amber-400 px-4 py-2 text-sm font-black text-black shadow-lg shadow-amber-950/20">{dailyDashboard.ctas[0].label}</button>
+
+    {homeAdapterPilotPreview.enabled && <section className="rounded-2xl border border-sky-300/30 bg-sky-950/20 p-4 text-xs text-sky-50" data-testid="home-adapter-pilot-preview" aria-label="Developer Preview">
+      <p className="font-black uppercase tracking-[0.24em] text-sky-200">Developer Preview</p>
+      {homeAdapterPilotPreview.state === "unavailable" ? <div className="mt-3 rounded-xl border border-amber-300/25 bg-amber-400/10 p-3 text-amber-50">
+        <p className="text-sm font-black">{homeAdapterPilotPreview.title}</p>
+        <p className="mt-1 text-xs">{homeAdapterPilotPreview.message}</p>
+      </div> : <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {homeAdapterPilotPreview.rows.map((row) => <div key={row.label} className="rounded-xl border border-white/10 bg-black/25 p-3">
+          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-sky-200/80">{row.label}</p>
+          <p className="mt-1 break-words font-bold text-white">{row.value}</p>
+        </div>)}
+      </div>}
+    </section>}
   </section>;
 }
 
-function TrainScreen({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance, trainingEngineResult }: any) {
-  return <TrainingPlan state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={workout} originalWorkout={originalWorkout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} plannedRunDistance={plannedRunDistance} trainingEngineResult={trainingEngineResult} />;
+function TrainScreen({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, latestCheckIn, runningRecommendation, scheduledRun, trainingEngineResult, plannerTrainPreviewPanel, plannerTrainScreenV1 }: any) {
+  if (plannerTrainScreenV1?.visible) return <PlannerTrainScreenV1DeveloperPanel screen={plannerTrainScreenV1} />;
+  return <TrainingPlan state={state} updateState={updateState} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} selectedDay={selectedDay} setSelectedDay={setSelectedDay} readiness={readiness} workout={workout} latestCheckIn={latestCheckIn} runningRecommendation={runningRecommendation} scheduledRun={scheduledRun} trainingEngineResult={trainingEngineResult} plannerTrainPreviewPanel={plannerTrainPreviewPanel} />;
 }
 
 function LogScreen({ state, updateState, readiness, trend, section, setSection }: { state: AppState; updateState: (s: AppState) => void; readiness: any; trend: any; section: LogSectionId; setSection: (section: LogSectionId) => void }) {
@@ -641,11 +935,11 @@ function DailyCheckInForm({ state, updateState }: { state: AppState; updateState
   </div>;
 }
 
-function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, originalWorkout, latestCheckIn, runningRecommendation, plannedRunDistance, trainingEngineResult: providedTrainingEngineResult }: { state: AppState; updateState: (s: AppState) => void; selectedWeek: number; setSelectedWeek: (n: number) => void; selectedDay: number; setSelectedDay: (n: number) => void; readiness: any; workout: any; originalWorkout: any; latestCheckIn?: DailyCheckIn; runningRecommendation?: any; plannedRunDistance: number; trainingEngineResult: TrainingEngineResult }) {
+function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, latestCheckIn, runningRecommendation, scheduledRun, trainingEngineResult: providedTrainingEngineResult, plannerTrainPreviewPanel }: { state: AppState; updateState: (s: AppState) => void; selectedWeek: number; setSelectedWeek: (n: number) => void; selectedDay: number; setSelectedDay: (n: number) => void; readiness: any; workout: any; latestCheckIn?: DailyCheckIn; runningRecommendation?: any; scheduledRun: { type: string; title?: string; distanceMiles: number; estimatedMinutes?: number } | null; trainingEngineResult: TrainingEngineResult; plannerTrainPreviewPanel?: PlannerTrainPreviewPanel | null }) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const displayedWorkout = workout;
   const tone = readiness.status === "Green" ? "green" : readiness.status === "Yellow" ? "yellow" : "red";
-  const plannedRun = runningRecommendation?.recommendedDistance ?? plannedRunDistance;
+  const plannedRun = scheduledRun?.distanceMiles ?? 0;
   const trainingEngineResult = providedTrainingEngineResult ?? evaluateTraining({
     currentDate: todayIso(),
     trainingPlan: null,
@@ -655,7 +949,7 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
     progressionResult: { weeklyDecision: "Repeat", nutritionDecision: "Maintain Calories", goalStatus: { "Fat Loss": "At Risk", Physique: "At Risk", Strength: "At Risk", "Half Marathon": "At Risk" }, confidence: "Low", dataQuality: { score: 40, confidence: "Low", missingInputs: ["progressionResult"], penalties: [], warnings: ["Need canonical progression output"] }, reasons: [], warnings: [], auditEntries: [] } as any,
     goalTrackingResult: { overallStatus: "Insufficient Data", confidence: "Low", dataQualityScore: 40, warnings: ["Need goal tracking output"], priorityGoal: "half_marathon", recommendations: [] } as any,
     scheduledWorkout: displayedWorkout,
-    scheduledRun: plannedRun > 0 ? { type: originalWorkout.longRunMiles ? "long" : "easy", title: `${plannedRun} mi planned`, distanceMiles: plannedRun } : null,
+    scheduledRun,
     availableMinutes: 90,
     userPreferences: { includeWarmup: true, includeCooldown: true },
   });
@@ -712,13 +1006,16 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
       <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-amber-300">Lift / workout block</p><h3 className="mt-2 text-xl font-black text-white">{trainingEngineResult.workout?.title ?? "No lift scheduled"}</h3><div className="mt-3 grid gap-2">{trainingEngineResult.workout ? trainingEngineResult.workout.items.map((item) => <p key={item} className="rounded-xl bg-black/20 p-3 text-sm text-zinc-300">{item}</p>) : <p className="text-zinc-400">Skip directly from warm-up to run or cooldown.</p>}</div><div className="mt-3"><DataConfidenceNotice note={workoutNote} /></div>{liftScheduled && <button onClick={startWorkout} className="mt-3 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Start Lift / Workout</button>}</div>
       <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="text-xs uppercase tracking-[0.2em] text-sky-300">Run block</p><h3 className="mt-2 text-xl font-black text-white">{trainingEngineResult.run?.title ?? "No run scheduled"}</h3><p className="mt-2 text-sm text-zinc-400">{trainingEngineResult.run?.description ?? "No run logging needed today."}</p>{latestCheckIn?.pain ? <p className="mt-3 rounded-xl bg-red-950/40 p-3 text-sm text-red-200">Pain flag: keep training pain-free.</p> : null}<div className="mt-3"><DataConfidenceNotice note={runningNote} /></div></div>
     </div>
-
-    <div className="mt-4 grid gap-3 lg:grid-cols-2">
+    <div className="mt-4 grid gap-3 md:grid-cols-3">
       <SessionInstructionBlock title="Warm-up" items={trainingEngineResult.warmup?.items ?? []} />
+      <SessionInstructionBlock title="Workout" items={trainingEngineResult.workout?.items ?? []} />
+      <SessionInstructionBlock title="Run" items={trainingEngineResult.run?.items ?? []} />
       <SessionInstructionBlock title="Cooldown" items={trainingEngineResult.cooldown?.items ?? []} />
     </div>
 
-    {runScheduled && <div className="mt-4"><TrainRunLogger state={state} updateState={updateState} plannedDistance={plannedRun} runType={displayedWorkout.longRunMiles ? "long run" : "easy"} existingRun={todayRun ?? undefined} /></div>}
+    {plannerTrainPreviewPanel?.visible && <PlannerTrainPreviewDeveloperPanel panel={plannerTrainPreviewPanel} />}
+
+    {runScheduled && <div className="mt-4"><TrainRunLogger state={state} updateState={updateState} plannedDistance={plannedRun} runType={(scheduledRun?.type === "long" ? "long run" : scheduledRun?.type === "tempo" ? "tempo" : scheduledRun?.type === "speed" ? "interval" : "easy") as RunType} existingRun={todayRun ?? undefined} /></div>}
 
     <Card className="mt-4" eyebrow="Session Summary" title="Training day status">
       <div className="grid gap-3 sm:grid-cols-4">

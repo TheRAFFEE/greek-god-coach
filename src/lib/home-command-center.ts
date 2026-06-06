@@ -18,6 +18,27 @@ import { humanizeDataQualityReason } from "./log-tab-ui";
 export type HomeGoalPriority = "Safety" | "Recovery" | "Training" | "Nutrition" | "Goals";
 export type HomeTrainingStatus = "Completed" | "Not Completed";
 export type HomeDataQuality = "High" | "Medium" | "Low";
+export type TodayRunType = "easy" | "tempo" | "speed" | "long" | "race";
+
+export interface TodayRunDisplay {
+  label: string;
+  title: string;
+  type: TodayRunType;
+  distanceMiles: number;
+  estimatedMinutes: number;
+  required: boolean;
+  dayIndex: number;
+  sourceWorkoutId: string;
+}
+
+export interface TodayRunForDateInput {
+  today: string;
+  currentWeek: number;
+  workouts: Workout[];
+  staleRunLabel?: string | null;
+  completedRunDates?: string[];
+  missedRunDates?: string[];
+}
 
 export interface HomeCommandCenterOptions {
   today: string;
@@ -124,6 +145,91 @@ function daysUntilJan17(today: string) {
   const year = current.getUTCMonth() === 0 && current.getUTCDate() <= 17 ? current.getUTCFullYear() : current.getUTCFullYear() + 1;
   const race = new Date(`${year}-01-17T00:00:00.000Z`);
   return Math.max(0, Math.ceil((race.getTime() - current.getTime()) / 86_400_000));
+}
+
+function planDayIndex(today: string) {
+  const day = new Date(`${today}T00:00:00.000Z`).getUTCDay();
+  return day === 0 ? 6 : day - 1;
+}
+
+function milesFromWorkout(workout: Workout) {
+  if (typeof workout.longRunMiles === "number" && workout.longRunMiles > 0) return workout.longRunMiles;
+  for (const exercise of workout.exercises ?? []) {
+    if (!/run|jog/i.test(exercise.name) && !/run/i.test(workout.type)) continue;
+    const miles = exercise.prescribedReps.match(/([\d.]+)\s*(?:mi|mile|miles)\b/i)?.[1];
+    if (miles) return Number(miles);
+  }
+  return 0;
+}
+
+function estimatedMinutesFromWorkout(workout: Workout, distanceMiles: number) {
+  if (distanceMiles > 0) return Math.max(20, Math.round(distanceMiles * (/long/i.test(workout.type) ? 11 : 10)));
+  const minutes = workout.exercises
+    ?.map((exercise) => exercise.prescribedReps.match(/([\d.]+)(?:\s*-\s*([\d.]+))?\s*min/i))
+    .find(Boolean);
+  if (!minutes) return 0;
+  const low = Number(minutes[1]);
+  const high = Number(minutes[2] ?? minutes[1]);
+  return Math.round((low + high) / 2);
+}
+
+function todayRunType(workout: Workout): TodayRunType {
+  const text = `${workout.type} ${workout.title}`;
+  if (/race/i.test(text)) return "race";
+  if (/long/i.test(text)) return "long";
+  if (/tempo|threshold/i.test(text)) return "tempo";
+  if (/speed|sprint|interval/i.test(text)) return "speed";
+  return "easy";
+}
+
+function isOptionalRun(workout: Workout) {
+  return /optional/i.test(`${workout.type} ${workout.title} ${workout.notes ?? ""}`);
+}
+
+function isRunWorkout(workout: Workout) {
+  const text = `${workout.type} ${workout.title}`;
+  if (/recovery|walk|mobility/i.test(workout.type)) return false;
+  if (workout.longRunMiles && workout.longRunMiles > 0) return true;
+  if (/race|long-run|tempo-run|easy-run|zone-2|\brun\b/i.test(text)) return true;
+  return (workout.exercises ?? []).some((exercise) => /run|jog/i.test(exercise.name) && /mi|mile|miles|min/i.test(exercise.prescribedReps));
+}
+
+function formatMiles(distanceMiles: number) {
+  return Number.isInteger(distanceMiles) ? String(distanceMiles) : distanceMiles.toFixed(1).replace(/\.0$/, "");
+}
+
+export function getTodayRunForDate(input: TodayRunForDateInput): TodayRunDisplay | null {
+  const dayIndex = planDayIndex(input.today);
+  const workout = input.workouts.find((candidate) => candidate.week === input.currentWeek && candidate.dayIndex === dayIndex);
+  if (!workout || !isRunWorkout(workout)) return null;
+
+  const distanceMiles = milesFromWorkout(workout);
+  const estimatedMinutes = estimatedMinutesFromWorkout(workout, distanceMiles);
+  if (distanceMiles <= 0 && estimatedMinutes <= 0) return null;
+
+  const required = !isOptionalRun(workout);
+  const suffix = distanceMiles > 0 ? ` — ${formatMiles(distanceMiles)} mi` : "";
+  const prefix = required ? "" : "Optional: ";
+  return {
+    label: `${prefix}${workout.title}${suffix}`,
+    title: workout.title,
+    type: todayRunType(workout),
+    distanceMiles,
+    estimatedMinutes,
+    required,
+    dayIndex,
+    sourceWorkoutId: workout.id,
+  };
+}
+
+export function getScheduledRunForTraining(todayRun: TodayRunDisplay | null, titleOverride?: string | null, distanceOverride?: number | null) {
+  if (!todayRun || todayRun.distanceMiles <= 0) return null;
+  return {
+    type: todayRun.type,
+    title: titleOverride && !/Hold:\s*3\s*mi/i.test(titleOverride) ? titleOverride : todayRun.label,
+    distanceMiles: distanceOverride && distanceOverride > 0 ? distanceOverride : todayRun.distanceMiles,
+    estimatedMinutes: todayRun.estimatedMinutes,
+  };
 }
 
 function conciseRecommendation(input: string, workout: string, run: string) {
@@ -314,7 +420,6 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
     },
   });
   const confidenceCard = compactDataQuality(readiness, progression, goalTracking, nutrition.adherence);
-  const fallbackRunDistance = Number(options.todaysRun.match(/[\d.]+/)?.[0] ?? 0);
   const trainingEngine = evaluateTraining({
     currentDate: options.today,
     trainingPlan: null,
@@ -324,8 +429,8 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
     progressionResult: progression,
     goalTrackingResult: goalTracking,
     scheduledWorkout: options.scheduledWorkout ?? null,
-    scheduledRun: options.scheduledRun ?? (fallbackRunDistance > 0 ? { type: /long/i.test(options.todaysRun) ? "long" : "easy", title: options.todaysRun, distanceMiles: fallbackRunDistance } : null),
-    availableMinutes: (options.workoutDurationMinutes ?? 50) + (options.runDurationMinutes ?? 30) + 15,
+    scheduledRun: options.scheduledRun ?? null,
+    availableMinutes: (options.workoutDurationMinutes ?? 50) + (options.scheduledRun ? (options.runDurationMinutes ?? options.scheduledRun.estimatedMinutes ?? 30) : 0) + 15,
     userPreferences: { includeWarmup: true, includeCooldown: true },
   });
   const performanceEngine = evaluatePerformance({
@@ -384,7 +489,7 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
       },
       run: {
         name: trainingEngine.run?.title ?? options.todaysRun,
-        estimatedDurationMinutes: trainingEngine.estimatedDuration.runMinutes || options.runDurationMinutes || 30,
+        estimatedDurationMinutes: trainingEngine.run ? trainingEngine.estimatedDuration.runMinutes : (options.scheduledRun ? (options.runDurationMinutes ?? options.scheduledRun.estimatedMinutes ?? 30) : 0),
         status: completedRunToday(state, options.today) ? "Completed" : "Not Completed",
       },
       estimatedDurationMinutes: trainingEngine.estimatedDuration.totalEstimatedMinutes,
