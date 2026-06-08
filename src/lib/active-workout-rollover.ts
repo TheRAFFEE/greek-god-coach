@@ -29,7 +29,8 @@ export interface ActiveWorkoutRolloverResult {
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 function sessionDate(session: WorkoutSession, options: Pick<ActiveWorkoutRolloverOptions, "locale" | "timeZone">): string {
-  if (session.date && isoDatePattern.test(session.date)) return session.date;
+  if (typeof session.date === "string" && isoDatePattern.test(session.date)) return session.date;
+  if (typeof session.startedAt !== "string" || session.startedAt.length === 0) return "";
   const parsed = new Date(session.startedAt);
   if (Number.isNaN(parsed.getTime())) return session.startedAt.slice(0, 10);
   return getLocalCalendarDateIso(parsed, options.locale, options.timeZone);

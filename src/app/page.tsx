@@ -17,7 +17,7 @@ import {
 } from "@/lib/coach-engine";
 import { deriveDailyCompletionStatus, evaluateDailyRecoveryStatus, upsertDailyCheckIn } from "@/lib/daily-checkin";
 import { buildDailyRolloverContext } from "@/lib/daily-rollover";
-import { resolveActiveWorkoutForToday } from "@/lib/active-workout-rollover";
+import { buildTrainRuntimeStatus } from "@/lib/train-runtime-guards";
 import { createInitialState, getWorkoutForWeekDay, workouts } from "@/lib/seed-data";
 import { buildWeightTrendDashboard } from "@/lib/weight-trend";
 import { saveTrainRunLog, type TrainRunLogInput } from "@/lib/run-logger";
@@ -939,15 +939,18 @@ function DailyCheckInForm({ state, updateState }: { state: AppState; updateState
 
 function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selectedDay, setSelectedDay, readiness, workout, latestCheckIn, runningRecommendation, scheduledRun, trainingEngineResult: providedTrainingEngineResult, plannerTrainPreviewPanel }: { state: AppState; updateState: (s: AppState) => void; selectedWeek: number; setSelectedWeek: (n: number) => void; selectedDay: number; setSelectedDay: (n: number) => void; readiness: any; workout: any; latestCheckIn?: DailyCheckIn; runningRecommendation?: any; scheduledRun: { type: string; title?: string; distanceMiles: number; estimatedMinutes?: number } | null; trainingEngineResult: TrainingEngineResult; plannerTrainPreviewPanel?: PlannerTrainPreviewPanel | null }) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const displayedWorkout = workout;
-  const tone = readiness.status === "Green" ? "green" : readiness.status === "Yellow" ? "yellow" : "red";
+  const displayedWorkout = workout ?? null;
+  const today = todayIso();
+  const trainRuntime = buildTrainRuntimeStatus({ state, workout: displayedWorkout, readiness, today, activeSessionId });
+  const safeReadiness = trainRuntime.readiness;
+  const tone = trainRuntime.tone;
   const plannedRun = scheduledRun?.distanceMiles ?? 0;
   const trainingEngineResult = providedTrainingEngineResult ?? evaluateTraining({
-    currentDate: todayIso(),
+    currentDate: today,
     trainingPlan: null,
     selectedWeek,
     selectedDay,
-    readinessResult: readiness,
+    readinessResult: safeReadiness,
     progressionResult: { weeklyDecision: "Repeat", nutritionDecision: "Maintain Calories", goalStatus: { "Fat Loss": "At Risk", Physique: "At Risk", Strength: "At Risk", "Half Marathon": "At Risk" }, confidence: "Low", dataQuality: { score: 40, confidence: "Low", missingInputs: ["progressionResult"], penalties: [], warnings: ["Need canonical progression output"] }, reasons: [], warnings: [], auditEntries: [] } as any,
     goalTrackingResult: { overallStatus: "Insufficient Data", confidence: "Low", dataQualityScore: 40, warnings: ["Need goal tracking output"], priorityGoal: "half_marathon", recommendations: [] } as any,
     scheduledWorkout: displayedWorkout,
@@ -955,19 +958,13 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
     availableMinutes: 90,
     userPreferences: { includeWarmup: true, includeCooldown: true },
   });
-  const trainBlocks = trainingEngineResult.todayPlan;
-  const liftScheduled = Boolean(trainingEngineResult.workout);
+  const trainBlocks = trainingEngineResult.todayPlan ?? [];
+  const liftScheduled = trainRuntime.hasPrescribedWorkout && Boolean(trainingEngineResult.workout);
   const runScheduled = Boolean(trainingEngineResult.run);
-  const today = todayIso();
-  const activeWorkoutRollover = resolveActiveWorkoutForToday(state, {
-    workoutId: displayedWorkout.id,
-    today,
-    preferredSessionId: activeSessionId,
-  });
-  const activeSession = activeWorkoutRollover.resumableSession;
+  const activeSession = trainRuntime.activeSession;
   const workoutNote = useDataConfidence(state, "workout");
   const runningNote = useDataConfidence(state, "running");
-  const liftCompleted = liftScheduled ? state.workoutSessions.some((session) => session.workoutId === displayedWorkout.id && session.status === "completed" && ((session.date ?? session.startedAt.slice(0, 10)) === today || session.endedAt?.slice(0, 10) === today)) : null;
+  const liftCompleted = liftScheduled ? Boolean(trainRuntime.liftCompleted) : null;
   const todayRun = runScheduled ? state.runLogs.find((run) => run.date === today && run.completed) : null;
   const runCompleted = runScheduled ? Boolean(todayRun) : null;
   const majorWarnings = [
@@ -977,28 +974,37 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
   ];
 
   const startWorkout = () => {
-    if (!liftScheduled) return;
+    if (!liftScheduled || !displayedWorkout?.id) return;
+    const exercises = Array.isArray(displayedWorkout.exercises) ? displayedWorkout.exercises : [];
     const now = new Date().toISOString();
     const session: WorkoutSession = {
       id: uid("session"),
       userId: state.user.id,
       workoutId: displayedWorkout.id,
-      workoutTitle: displayedWorkout.title,
+      workoutTitle: displayedWorkout.title ?? "Workout",
       mode: "coach",
       date: today,
       startedAt: now,
-      status: displayedWorkout.exercises.length ? "active" : "completed",
+      status: exercises.length ? "active" : "completed",
       currentExerciseIndex: 0,
       currentSetNumber: 1,
       setLogs: [],
-      endedAt: displayedWorkout.exercises.length ? undefined : now,
+      endedAt: exercises.length ? undefined : now,
     };
     updateState({ ...state, workoutSessions: [...state.workoutSessions, session] });
     setActiveSessionId(session.id);
   };
 
   if (activeSession) {
-    return <ActiveWorkout state={state} updateState={updateState} session={activeSession} workout={displayedWorkout} readinessStatus={readiness.status} onBackToPreview={() => setActiveSessionId(null)} />;
+    return <ActiveWorkout state={state} updateState={updateState} session={activeSession} workout={displayedWorkout} readinessStatus={safeReadiness.status} onBackToPreview={() => setActiveSessionId(null)} />;
+  }
+
+  if (trainRuntime.emptyState) {
+    return <section className="rounded-3xl border border-white/10 bg-zinc-950/80 p-4 shadow-2xl shadow-black/30">
+      <Card eyebrow="Train" title="Today’s complete training session">
+        <EmptyState title={trainRuntime.emptyState.title} copy={trainRuntime.emptyState.copy} />
+      </Card>
+    </section>;
   }
 
   return <section className="rounded-3xl border border-white/10 bg-zinc-950/80 p-4 shadow-2xl shadow-black/30">
@@ -1028,7 +1034,7 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
       <div className="grid gap-3 sm:grid-cols-4">
         <Stat label="Lift completed" value={liftCompleted === null ? "Not scheduled" : liftCompleted ? "Yes" : "No"} tone={liftCompleted === null ? "neutral" : liftCompleted ? "green" : "yellow"} />
         <Stat label="Run completed" value={runCompleted === null ? "Not scheduled" : runCompleted ? "Yes" : "No"} tone={runCompleted === null ? "neutral" : runCompleted ? "green" : "yellow"} />
-        <Stat label="Readiness used" value={`${readiness.status} — ${readiness.score}`} sub={readiness.reason} tone={tone} />
+        <Stat label="Readiness used" value={`${safeReadiness.status} — ${safeReadiness.score}`} sub={safeReadiness.reason} tone={tone} />
         <Stat label="Next action" value={liftScheduled && !liftCompleted ? "Start lift" : runScheduled && !runCompleted ? "Log run" : "Cooldown + recover"} />
       </div>
       {majorWarnings.length ? <div className="mt-4 rounded-2xl border border-red-300/20 bg-red-950/30 p-4 text-sm text-red-100"><p className="font-black">Major warnings</p><ul className="mt-2 list-disc space-y-1 pl-5">{majorWarnings.map((warning: string) => <li key={warning}>{warning}</li>)}</ul></div> : <p className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-4 text-sm text-emerald-100">No major training warnings from today’s readiness/run recommendation.</p>}
@@ -1037,7 +1043,7 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
     <div className="mt-3 grid gap-3 md:grid-cols-3">
       <Field label="Week"><select className={inputClass} value={selectedWeek} onChange={(e) => setSelectedWeek(Number(e.target.value))}>{Array.from({ length: 12 }, (_, i) => <option key={i+1} value={i+1}>Week {i+1}</option>)}</select></Field>
       <Field label="Day"><select className={inputClass} value={selectedDay} onChange={(e) => setSelectedDay(Number(e.target.value))}>{["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"].map((d, i) => <option key={d} value={i}>{d}</option>)}</select></Field>
-      <Stat label="Readiness" value={`${readiness.status} — ${readiness.score}`} sub={readiness.reason} tone={tone} />
+      <Stat label="Readiness" value={`${safeReadiness.status} — ${safeReadiness.score}`} sub={safeReadiness.reason} tone={tone} />
     </div>
   </section>;
 }
