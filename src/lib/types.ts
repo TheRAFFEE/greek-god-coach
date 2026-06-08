@@ -328,6 +328,8 @@ export interface WorkoutSession {
   workoutId: string;
   workoutTitle: string;
   mode: AppMode;
+  /** Local calendar date that owns this active workout session. Legacy sessions may omit it and fall back to startedAt. */
+  date?: string;
   startedAt: string;
   endedAt?: string;
   status: WorkoutSessionStatus;

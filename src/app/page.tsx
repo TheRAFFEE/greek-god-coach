@@ -16,12 +16,15 @@ import {
   buildRunTrendCards,
 } from "@/lib/coach-engine";
 import { deriveDailyCompletionStatus, evaluateDailyRecoveryStatus, upsertDailyCheckIn } from "@/lib/daily-checkin";
+import { buildDailyRolloverContext } from "@/lib/daily-rollover";
+import { resolveActiveWorkoutForToday } from "@/lib/active-workout-rollover";
 import { createInitialState, getWorkoutForWeekDay, workouts } from "@/lib/seed-data";
 import { buildWeightTrendDashboard } from "@/lib/weight-trend";
 import { saveTrainRunLog, type TrainRunLogInput } from "@/lib/run-logger";
 import { evaluateTraining, type TrainingEngineResult } from "@/lib/training-engine";
 import { buildNutritionUiV2Model, createMealFromNutritionUiV2ManualEntry, createMealFromNutritionUiV2SavedFood, syncNutritionLogFromNutritionUiV2Meals, type NutritionUiMealCategory } from "@/lib/nutrition-ui";
-import { buildConfirmedFoodAiMealLog, buildFoodAiMealFromMealLog, buildFoodAiReviewDraft, foodAiMealCategoryToMealLogType, type FoodAiReviewDraft, type FoodAiMode } from "@/lib/food-ai";
+import { buildFoodAiReviewDraft, type FoodAiReviewDraft, type FoodAiMode } from "@/lib/food-ai";
+import { buildFoodAiApiFailureMessage, buildFoodAiNoImageGuidance, confirmFoodAiDraftForToday, foodAiImageInputProps } from "@/lib/food-ai-nutrition-flow";
 import { buildWeeklyReviewSummary } from "@/lib/weekly-review";
 import { buildCompactAppChrome } from "@/lib/app-chrome";
 import { buildHomeCommandCenter, getScheduledRunForTraining, getTodayRunForDate } from "@/lib/home-command-center";
@@ -157,19 +160,18 @@ export default function Home() {
       .catch(() => { saveState(state); setPersistenceStatus("localStorage fallback after sync error"); });
   }, [state, persistenceContext]);
 
-  const latestCheckIn = useMemo(() => state?.checkIns.at(-1), [state]);
-  const today = todayIso();
-  const todayPlanDayIndex = useMemo(() => {
-    const day = new Date(`${today}T00:00:00.000Z`).getUTCDay();
-    return day === 0 ? 6 : day - 1;
-  }, [today]);
+  const dailyRollover = useMemo(() => state ? buildDailyRolloverContext(state) : null, [state]);
+  const latestCheckIn = dailyRollover?.todayCheckIn ?? undefined;
+  const today = dailyRollover?.today ?? todayIso();
+  const effectiveWeek = dailyRollover?.currentWeek ?? selectedWeek;
+  const todayPlanDayIndex = dailyRollover?.dayIndex ?? selectedDay;
   const baseline = useMemo(() => ({ restingHr: 58, hrv: 60 }), []);
   const readiness = useMemo(() => latestCheckIn ? calculateReadiness(latestCheckIn, baseline) : null, [latestCheckIn, baseline]);
   const currentWorkout = useMemo(() => getWorkoutForWeekDay(selectedWeek, selectedDay), [selectedWeek, selectedDay]);
-  const todayWorkout = useMemo(() => getWorkoutForWeekDay(state?.currentWeek ?? selectedWeek, todayPlanDayIndex), [state?.currentWeek, selectedWeek, todayPlanDayIndex]);
+  const todayWorkout = useMemo(() => getWorkoutForWeekDay(effectiveWeek, todayPlanDayIndex), [effectiveWeek, todayPlanDayIndex]);
   const adjustedWorkout = useMemo(() => readiness ? adjustWorkoutForReadiness(currentWorkout, readiness.status) : currentWorkout, [currentWorkout, readiness]);
   const adjustedTodayWorkout = useMemo(() => readiness ? adjustWorkoutForReadiness(todayWorkout, readiness.status) : todayWorkout, [todayWorkout, readiness]);
-  const macroTarget = useMemo(() => state?.macroTargets.find((m) => m.week === selectedWeek) ?? state?.macroTargets[0], [state, selectedWeek]);
+  const macroTarget = useMemo(() => state?.macroTargets.find((m) => m.week === effectiveWeek) ?? state?.macroTargets[0], [state, effectiveWeek]);
   const trend = useMemo(() => state ? calculateWeightTrend(state.bodyMetrics) : null, [state]);
   const trainingAdherence = useMemo(() => state?.checkIns.length ? Math.round((state.checkIns.slice(-7).filter((c) => c.workoutCompleted).length / Math.min(7, state.checkIns.length)) * 100) : 0, [state]);
   const weeklyReview = useMemo(() => {
@@ -181,13 +183,13 @@ export default function Home() {
     return buildWeeklyReviewSummary(state, { startDate, endDate });
   }, [state]);
   const runTrends = useMemo(() => state ? calculateRunTrends(state.runLogs ?? []) : null, [state]);
-  const todayRunDisplay = useMemo(() => state ? getTodayRunForDate({ today, currentWeek: state.currentWeek, workouts, staleRunLabel: "Hold: 3 mi", completedRunDates: (state.runLogs ?? []).filter((run) => run.completed).map((run) => run.date) }) : null, [state, today]);
+  const todayRunDisplay = useMemo(() => state ? getTodayRunForDate({ today, currentWeek: effectiveWeek, workouts, staleRunLabel: "Hold: 3 mi", completedRunDates: (state.runLogs ?? []).filter((run) => run.completed).map((run) => run.date) }) : null, [state, today, effectiveWeek]);
   const plannedRunDistance = todayRunDisplay?.distanceMiles ?? 0;
   const runningRecommendation = useMemo(() => state && readiness && runTrends && todayRunDisplay && plannedRunDistance > 0 ? generateRunningRecommendation({ runLogs: state.runLogs ?? [], nextDayReadiness: readiness.status, plannedDistance: plannedRunDistance, runType: todayRunDisplay.type === "long" ? "Long run" : todayRunDisplay.type === "tempo" ? "Tempo" : todayRunDisplay.type === "speed" ? "Speed" : "Zone 2", currentWeeklyMileage: runTrends.weeklyMileage, previousWeeklyMileage: Math.max(0, runTrends.weeklyMileage - plannedRunDistance) }) : null, [state, readiness, runTrends, todayRunDisplay, plannedRunDistance]);
   const nextRunLabel = todayRunDisplay ? (runningRecommendation ? `${todayRunDisplay.required ? "" : "Optional: "}${runningRecommendation.action}: ${runningRecommendation.recommendedDistance} mi` : todayRunDisplay.label) : "No run scheduled today";
   const scheduledRunForTraining = useMemo(() => getScheduledRunForTraining(todayRunDisplay, nextRunLabel, runningRecommendation?.recommendedDistance), [todayRunDisplay, nextRunLabel, runningRecommendation?.recommendedDistance]);
   const dailyPrescription = useMemo(() => state && latestCheckIn && macroTarget && readiness ? generateDailyPrescription({ readiness, checkIn: latestCheckIn, workout: todayWorkout, macroTarget, nutritionLogs: state.nutritionLogs, bodyMetrics: state.bodyMetrics, trainingAdherence, postWorkoutRecommendations: state.postWorkoutRecommendations, runningRecommendation: runningRecommendation ?? undefined }) : null, [state, latestCheckIn, macroTarget, readiness, todayWorkout, trainingAdherence, runningRecommendation]);
-  const homeCommandCenter = useMemo(() => state && macroTarget && readiness && dailyPrescription ? buildHomeCommandCenter(state, { today, readinessStatus: readiness.status, todaysWorkout: adjustedTodayWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription.exactWorkoutRecommendation, scheduledWorkout: adjustedTodayWorkout, scheduledRun: scheduledRunForTraining, runDurationMinutes: todayRunDisplay?.estimatedMinutes ?? 0 }) : null, [state, macroTarget, readiness, dailyPrescription, today, adjustedTodayWorkout, nextRunLabel, todayRunDisplay?.estimatedMinutes, scheduledRunForTraining]);
+  const homeCommandCenter = useMemo(() => state && macroTarget ? buildHomeCommandCenter(dailyRollover?.effectiveState ?? state, { today, readinessStatus: readiness?.status ?? "Yellow", todaysWorkout: adjustedTodayWorkout.title, todaysRun: nextRunLabel, macroTarget, coachRecommendation: dailyPrescription?.exactWorkoutRecommendation ?? dailyRollover?.recoveryStatus.message ?? "Complete Daily Check-In to unlock today's coaching orders.", scheduledWorkout: adjustedTodayWorkout, scheduledRun: scheduledRunForTraining, runDurationMinutes: todayRunDisplay?.estimatedMinutes ?? 0 }) : null, [state, macroTarget, dailyRollover, today, readiness, adjustedTodayWorkout, nextRunLabel, dailyPrescription, scheduledRunForTraining, todayRunDisplay?.estimatedMinutes]);
   const missionControlContext = useMemo(() => {
     if (!state || !homeCommandCenter) return null;
     const latest = latestBodyMetrics(state);
@@ -432,10 +434,10 @@ export default function Home() {
       }}
     />;
   }
-  if (!state || !readiness || !macroTarget || !trend || !weeklyReview || !dailyPrescription || !homeCommandCenter || !missionControl) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
+  if (!state || !macroTarget || !trend || !weeklyReview || !homeCommandCenter || !missionControl) return <main className="min-h-screen bg-black p-8 text-white">Loading coach...</main>;
 
   const updateState = (next: AppState) => setState(next);
-  const appChrome = buildCompactAppChrome({ currentWeek: selectedWeek });
+  const appChrome = buildCompactAppChrome({ currentWeek: effectiveWeek });
   const showLegacyPlannerShadowPanel = shouldRenderLegacyPlannerShadowPanel({
     plannerDebugEnabled,
     legacyShadowPanelVisible: Boolean(plannerShadowPanel?.visible),
@@ -956,12 +958,16 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
   const trainBlocks = trainingEngineResult.todayPlan;
   const liftScheduled = Boolean(trainingEngineResult.workout);
   const runScheduled = Boolean(trainingEngineResult.run);
-  const activeSession = (activeSessionId ? state.workoutSessions.find((session) => session.id === activeSessionId) : null)
-    ?? [...state.workoutSessions].reverse().find((session) => session.workoutId === displayedWorkout.id && session.status === "active");
+  const today = todayIso();
+  const activeWorkoutRollover = resolveActiveWorkoutForToday(state, {
+    workoutId: displayedWorkout.id,
+    today,
+    preferredSessionId: activeSessionId,
+  });
+  const activeSession = activeWorkoutRollover.resumableSession;
   const workoutNote = useDataConfidence(state, "workout");
   const runningNote = useDataConfidence(state, "running");
-  const today = todayIso();
-  const liftCompleted = liftScheduled ? state.workoutSessions.some((session) => session.workoutId === displayedWorkout.id && session.status === "completed" && (session.startedAt.slice(0, 10) === today || session.endedAt?.slice(0, 10) === today)) : null;
+  const liftCompleted = liftScheduled ? state.workoutSessions.some((session) => session.workoutId === displayedWorkout.id && session.status === "completed" && ((session.date ?? session.startedAt.slice(0, 10)) === today || session.endedAt?.slice(0, 10) === today)) : null;
   const todayRun = runScheduled ? state.runLogs.find((run) => run.date === today && run.completed) : null;
   const runCompleted = runScheduled ? Boolean(todayRun) : null;
   const majorWarnings = [
@@ -979,6 +985,7 @@ function TrainingPlan({ state, updateState, selectedWeek, setSelectedWeek, selec
       workoutId: displayedWorkout.id,
       workoutTitle: displayedWorkout.title,
       mode: "coach",
+      date: today,
       startedAt: now,
       status: displayedWorkout.exercises.length ? "active" : "completed",
       currentExerciseIndex: 0,
@@ -1264,6 +1271,7 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
   const model = buildNutritionUiV2Model(state, { date, macroTarget });
   const nutritionNote = useDataConfidence(state, "nutrition");
   const foodAiProviderLabel = buildFoodScanProviderLabel({ provider: foodAiProvider ?? foodAiDraft?.provider, error: foodAiError, hasDraft: Boolean(foodAiDraft), scanning: foodAiScanning });
+  const foodAiCaptureProps = foodAiImageInputProps(foodAiMode);
   const setManual = (field: keyof typeof manualMeal, value: string | number) => setManualMeal({ ...manualMeal, [field]: value });
   const syncStateWithMeals = (nextMeals: AppState["meals"]) => {
     const existingLog = state.nutritionLogs.find((log) => log.date === date);
@@ -1297,7 +1305,7 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
     setFoodAiStatus(`${file.name} ready for ${foodAiMode}.`);
   };
   const runFoodAiScan = async () => {
-    if (!foodAiImageDataUrl) { setFoodAiStatus("Upload an image before running FOOD_AI_V1."); return; }
+    if (!foodAiImageDataUrl) { setFoodAiStatus(buildFoodAiNoImageGuidance(foodAiMode)); return; }
     setFoodAiScanning(true);
     setFoodAiError(undefined);
     setFoodAiStatus(foodAiMode === "Nutrition Label Scan" ? "OCR extracting nutrition label..." : "AI estimating meal photo macros...");
@@ -1314,7 +1322,7 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
       setFoodAiError(undefined);
       setFoodAiStatus(payload.warning ?? "Scan ready for user review.");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "FOOD_AI_V1 scan failed.";
+      const message = buildFoodAiApiFailureMessage(error instanceof Error ? error.message : undefined);
       setFoodAiError(message);
       setFoodAiStatus(message);
     } finally {
@@ -1328,11 +1336,19 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
   };
   const confirmFoodAiMeal = () => {
     if (!foodAiDraft) return;
-    const mealLog = buildConfirmedFoodAiMealLog({ id: uid("meal-log"), date, mealType: foodAiMealCategoryToMealLogType(category), draft: foodAiDraft });
-    const meal = buildFoodAiMealFromMealLog({ mealLog, id: uid("meal"), userId: state.user.id });
-    syncStateWithMeals([...state.meals.filter((entry) => entry.id !== meal.id), meal]);
+    const { nextState, mealLog } = confirmFoodAiDraftForToday({
+      state,
+      today,
+      category,
+      draft: foodAiDraft,
+      macroTarget,
+      mealId: uid("meal"),
+      mealLogId: uid("meal-log"),
+    });
+    updateState(nextState);
+    setDate(today);
     setFoodAiDraft(null);
-    setFoodAiStatus(`${mealLog.name} saved as ${mealLog.source} (${mealLog.confidence} Confidence).`);
+    setFoodAiStatus(`${mealLog.name} added to today's nutrition log as ${mealLog.source} (${mealLog.confidence} Confidence).`);
   };
   const removeMeal = (mealId: string) => syncStateWithMeals(state.meals.filter((meal) => meal.id !== mealId));
   const progressTone = (percent: number, key: string) => key === "calories" ? percent >= 90 && percent <= 105 ? "from-emerald-300 to-emerald-500" : percent > 105 ? "from-red-300 to-red-500" : "from-amber-300 to-orange-400" : percent >= 90 ? "from-emerald-300 to-emerald-500" : "from-amber-300 to-orange-400";
@@ -1367,7 +1383,7 @@ function NutritionLogger({ state, updateState }: { state: AppState; updateState:
           <Field label="Meal card"><select className={inputClass} value={category} onChange={(event) => setCategory(event.target.value as NutritionUiMealCategory)}><option>Breakfast</option><option>Lunch</option><option>Dinner</option><option>Snack</option></select></Field>
           <div className="rounded-3xl border border-white/10 bg-black/25 p-4"><p className="font-black text-white">Manual meal entry</p><div className="mt-3 grid gap-3 sm:grid-cols-2"><Field label="Meal name"><input className={inputClass} value={manualMeal.name} onChange={(event) => setManual("name", event.target.value)} placeholder="Chicken bowl" /></Field><Field label="Calories"><input className={inputClass} type="number" min="0" value={manualMeal.calories} onChange={(event) => setManual("calories", Number(event.target.value))} /></Field><Field label="Protein"><input className={inputClass} type="number" min="0" value={manualMeal.protein} onChange={(event) => setManual("protein", Number(event.target.value))} /></Field><Field label="Carbs"><input className={inputClass} type="number" min="0" value={manualMeal.carbs} onChange={(event) => setManual("carbs", Number(event.target.value))} /></Field><Field label="Fat"><input className={inputClass} type="number" min="0" value={manualMeal.fat} onChange={(event) => setManual("fat", Number(event.target.value))} /></Field><Field label="Fiber"><input className={inputClass} type="number" min="0" value={manualMeal.fiber} onChange={(event) => setManual("fiber", Number(event.target.value))} /></Field><Field label="Water"><input className={inputClass} type="number" min="0" value={manualMeal.water} onChange={(event) => setManual("water", Number(event.target.value))} /></Field><Field label="Notes"><input className={inputClass} value={manualMeal.notes} onChange={(event) => setManual("notes", event.target.value)} /></Field></div><button type="button" onClick={saveManualMeal} className="mt-4 w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-black">Add manual meal</button></div>
           <div className="rounded-3xl border border-white/10 bg-black/25 p-4"><p className="font-black text-white">Saved foods</p><div className="mt-3 grid gap-3"><Field label="Saved food"><select className={inputClass} value={savedFoodId} onChange={(event) => setSavedFoodId(event.target.value)}>{model.savedFoods.map((food) => <option key={food.id} value={food.id}>{food.name} · {food.calories} cal · {food.protein}P</option>)}</select></Field><Field label="Servings"><input className={inputClass} type="number" min="0.25" step="0.25" value={savedFoodServings} onChange={(event) => setSavedFoodServings(Number(event.target.value))} /></Field></div><button type="button" onClick={saveSavedFood} className="mt-4 w-full rounded-2xl border border-emerald-300/30 bg-emerald-300/15 px-4 py-3 font-black text-emerald-100">Add saved food</button></div>
-          <div className="rounded-3xl border border-white/10 bg-black/25 p-4"><p className="font-black text-white">FOOD_AI_V1 scanners</p><p className="mt-1 text-xs text-zinc-500">Nutrition Label Scanner uses OCR/review/servings confirmation. Meal Photo Scanner estimates macros and stays Medium Confidence after confirmation.</p><div className="mt-3 grid gap-3"><Field label="Scanner"><select className={inputClass} value={foodAiMode} onChange={(event) => { setFoodAiMode(event.target.value as FoodAiMode); setFoodAiDraft(null); }}><option>Nutrition Label Scan</option><option>Food Photo Scan</option></select></Field><Field label="Upload image"><input className={inputClass} type="file" accept="image/*" onChange={(event) => { void onFoodAiFile(event.target.files?.[0] ?? null); }} /></Field><Field label="Servings eaten"><input className={inputClass} type="number" min="0.25" step="0.25" value={foodAiServings} onChange={(event) => { const servings = Number(event.target.value); setFoodAiServings(servings); if (foodAiDraft) setFoodAiDraft(buildFoodAiReviewDraft({ result: { id: foodAiDraft.scanId, mode: foodAiDraft.mode, detectedName: foodAiDraft.name, servingSize: foodAiDraft.servingSize, servingsEaten: 1, calories: foodAiDraft.perServing.calories, protein: foodAiDraft.perServing.protein, carbs: foodAiDraft.perServing.carbs, fat: foodAiDraft.perServing.fat, fiber: foodAiDraft.perServing.fiber, sodium: foodAiDraft.perServing.sodium, confidence: foodAiDraft.providerConfidence, provider: foodAiDraft.provider, isMock: foodAiDraft.provider.includes("mock") }, servingsEaten: servings, edits: foodAiEdits, imageUrl: foodAiDraft.imageUrl })); }} /></Field><button type="button" disabled={foodAiScanning} onClick={runFoodAiScan} className="rounded-2xl bg-sky-300 px-4 py-3 font-black text-black disabled:opacity-50">{foodAiScanning ? "Scanning..." : foodAiMode === "Nutrition Label Scan" ? "Run label OCR" : "Run meal photo AI"}</button></div><div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p className="text-xs font-black uppercase tracking-[0.18em] text-zinc-300">{foodAiProviderLabel.label}</p><p className="mt-1 text-xs text-zinc-400">{foodAiProviderLabel.detail}</p><p className="mt-2 text-xs text-zinc-500">Status: {foodAiStatus}</p></div>{foodAiIssues.length ? <ul className="mt-2 grid gap-1 text-xs text-yellow-200">{foodAiIssues.map((issue) => <li key={issue}>• {issue}</li>)}</ul> : null}{foodAiDraft ? <div className="mt-4 rounded-2xl border border-sky-300/20 bg-sky-300/10 p-3"><p className="text-xs font-black uppercase tracking-[0.2em] text-sky-200">Review before confirm</p><div className="mt-3 grid gap-2 sm:grid-cols-2"><Field label="Name"><input className={inputClass} value={foodAiEdits.name} onChange={(event) => updateFoodAiEdit("name", event.target.value)} /></Field><Field label="Calories / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.calories} onChange={(event) => updateFoodAiEdit("calories", Number(event.target.value))} /></Field><Field label="Protein / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.protein} onChange={(event) => updateFoodAiEdit("protein", Number(event.target.value))} /></Field><Field label="Carbs / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.carbs} onChange={(event) => updateFoodAiEdit("carbs", Number(event.target.value))} /></Field><Field label="Fat / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.fat} onChange={(event) => updateFoodAiEdit("fat", Number(event.target.value))} /></Field><Field label="Fiber / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.fiber} onChange={(event) => updateFoodAiEdit("fiber", Number(event.target.value))} /></Field></div><p className="mt-3 text-sm text-zinc-300">Totals: <b className="text-white">{foodAiDraft.totals.calories} cal · {foodAiDraft.totals.protein}P / {foodAiDraft.totals.carbs}C / {foodAiDraft.totals.fat}F · Fiber {foodAiDraft.totals.fiber}g</b></p><p className="mt-1 text-xs text-zinc-400">{foodAiDraft.reviewWarning}</p><button type="button" onClick={confirmFoodAiMeal} className="mt-3 w-full rounded-2xl bg-emerald-300 px-4 py-3 font-black text-black">Confirm and save MealLog</button></div> : null}</div>
+          <div className="rounded-3xl border border-white/10 bg-black/25 p-4"><p className="font-black text-white">FOOD_AI_V1 scanners</p><p className="mt-1 text-xs text-zinc-500">Nutrition Label Scanner uses OCR/review/servings confirmation. Meal Photo Scanner estimates macros and stays Medium Confidence after confirmation.</p><div className="mt-3 grid gap-3"><Field label="Scanner"><select className={inputClass} value={foodAiMode} onChange={(event) => { setFoodAiMode(event.target.value as FoodAiMode); setFoodAiDraft(null); }}><option>Nutrition Label Scan</option><option>Food Photo Scan</option></select></Field><div className="grid gap-2"><Field label={foodAiCaptureProps.label}><input className={inputClass} type="file" accept={foodAiCaptureProps.accept} capture={foodAiCaptureProps.capture} aria-label={foodAiCaptureProps.label} onChange={(event) => { void onFoodAiFile(event.target.files?.[0] ?? null); }} /></Field><p className="text-xs text-zinc-500">{foodAiCaptureProps.helperText}</p>{foodAiImageDataUrl ? <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-2"><img src={foodAiImageDataUrl} alt="Selected nutrition scan preview" className="h-16 w-16 rounded-xl object-cover" /><p className="break-all text-xs font-bold text-zinc-300">Selected: {foodAiFileName || "camera image"}</p></div> : <p className="rounded-2xl border border-dashed border-white/10 p-3 text-xs text-zinc-500">No image selected yet. Use Take photo / scan label or choose from your gallery.</p>}</div><Field label="Servings eaten"><input className={inputClass} type="number" min="0.25" step="0.25" value={foodAiServings} onChange={(event) => { const servings = Number(event.target.value); setFoodAiServings(servings); if (foodAiDraft) setFoodAiDraft(buildFoodAiReviewDraft({ result: { id: foodAiDraft.scanId, mode: foodAiDraft.mode, detectedName: foodAiDraft.name, servingSize: foodAiDraft.servingSize, servingsEaten: 1, calories: foodAiDraft.perServing.calories, protein: foodAiDraft.perServing.protein, carbs: foodAiDraft.perServing.carbs, fat: foodAiDraft.perServing.fat, fiber: foodAiDraft.perServing.fiber, sodium: foodAiDraft.perServing.sodium, confidence: foodAiDraft.providerConfidence, provider: foodAiDraft.provider, isMock: foodAiDraft.provider.includes("mock") }, servingsEaten: servings, edits: foodAiEdits, imageUrl: foodAiDraft.imageUrl })); }} /></Field><button type="button" disabled={foodAiScanning} onClick={runFoodAiScan} className="rounded-2xl bg-sky-300 px-4 py-3 font-black text-black disabled:opacity-50">{foodAiScanning ? "Scanning..." : foodAiMode === "Nutrition Label Scan" ? "Run label OCR" : "Run meal photo AI"}</button></div><div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3"><p className="text-xs font-black uppercase tracking-[0.18em] text-zinc-300">{foodAiProviderLabel.label}</p><p className="mt-1 text-xs text-zinc-400">{foodAiProviderLabel.detail}</p><p className="mt-2 text-xs text-zinc-500">Status: {foodAiStatus}</p></div>{foodAiIssues.length ? <ul className="mt-2 grid gap-1 text-xs text-yellow-200">{foodAiIssues.map((issue) => <li key={issue}>• {issue}</li>)}</ul> : null}{foodAiDraft ? <div className="mt-4 rounded-2xl border border-sky-300/20 bg-sky-300/10 p-3"><p className="text-xs font-black uppercase tracking-[0.2em] text-sky-200">Review before confirm</p><div className="mt-3 grid gap-2 sm:grid-cols-2"><Field label="Name"><input className={inputClass} value={foodAiEdits.name} onChange={(event) => updateFoodAiEdit("name", event.target.value)} /></Field><Field label="Calories / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.calories} onChange={(event) => updateFoodAiEdit("calories", Number(event.target.value))} /></Field><Field label="Protein / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.protein} onChange={(event) => updateFoodAiEdit("protein", Number(event.target.value))} /></Field><Field label="Carbs / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.carbs} onChange={(event) => updateFoodAiEdit("carbs", Number(event.target.value))} /></Field><Field label="Fat / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.fat} onChange={(event) => updateFoodAiEdit("fat", Number(event.target.value))} /></Field><Field label="Fiber / serving"><input className={inputClass} type="number" min="0" value={foodAiEdits.fiber} onChange={(event) => updateFoodAiEdit("fiber", Number(event.target.value))} /></Field></div><p className="mt-3 text-sm text-zinc-300">Totals: <b className="text-white">{foodAiDraft.totals.calories} cal · {foodAiDraft.totals.protein}P / {foodAiDraft.totals.carbs}C / {foodAiDraft.totals.fat}F · Fiber {foodAiDraft.totals.fiber}g</b></p><p className="mt-1 text-xs text-zinc-400">{foodAiDraft.reviewWarning}</p><button type="button" onClick={confirmFoodAiMeal} className="mt-3 w-full rounded-2xl bg-emerald-300 px-4 py-3 font-black text-black">Confirm / add to today&apos;s nutrition log</button></div> : null}</div>
         </div>
       </Card>
     </section>

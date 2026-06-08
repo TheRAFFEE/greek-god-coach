@@ -1,5 +1,6 @@
 import type { AppMode, AppState, MacroTarget, Meal, MealCategory, MealItem, RaceCalendarSettings } from "./types";
 import { createInitialState } from "./seed-data";
+import { getLocalCalendarDateIso } from "./daily-rollover";
 import { createBackupPayload, LAST_BACKUP_DATE_KEY, PRE_RESTORE_BACKUP_KEY, SNAPSHOT_KEYS, STORAGE_KEY, type BackupPayload } from "./backup-restore";
 
 const key = STORAGE_KEY;
@@ -194,5 +195,5 @@ export function resetState() {
   return createInitialState();
 }
 
-export const todayIso = () => new Date().toISOString().slice(0, 10);
+export const todayIso = () => getLocalCalendarDateIso();
 export const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;

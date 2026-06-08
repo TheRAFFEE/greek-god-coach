@@ -238,12 +238,12 @@ function conciseRecommendation(input: string, workout: string, run: string) {
   return `${command} Run plan: ${run}. Keep the mission simple: check in, train, and log nutrition.`;
 }
 
-function mostRecentCheckIn(state: AppState, today: string) {
-  return [...(state.checkIns ?? [])].reverse().find((entry) => entry.date <= today) ?? state.checkIns?.at(-1);
+function todayCheckIn(state: AppState, today: string) {
+  return (state.checkIns ?? []).find((entry) => entry.date === today);
 }
 
 function readinessFromState(state: AppState, today: string, fallbackStatus: string): ReadinessEngineResult {
-  const checkIn = mostRecentCheckIn(state, today);
+  const checkIn = todayCheckIn(state, today);
   if (checkIn) return evaluateReadiness(readinessInputFromDailyCheckIn(checkIn, { restingHr: 58, hrv: 60 }));
   return {
     score: fallbackStatus === "Green" ? 85 : fallbackStatus === "Yellow" ? 65 : 40,
@@ -257,6 +257,10 @@ function readinessFromState(state: AppState, today: string, fallbackStatus: stri
     recoveryGuidance: ["Complete Daily Check-In."],
     dataQualityWarnings: ["Missing daily readiness check-in."],
   };
+}
+
+function missingTodayCheckIn(state: AppState, today: string) {
+  return !todayCheckIn(state, today);
 }
 
 function nutritionSummary(state: AppState, macroTarget: MacroTarget, today: string) {
@@ -391,6 +395,7 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
   const nutrition = nutritionSummary(state, options.macroTarget, options.today);
   const caloriesRemaining = Math.max(0, options.macroTarget.calories - (nutrition.todaysNutrition?.calories ?? 0));
   const readiness = options.readinessResult ?? readinessFromState(state, options.today, options.readinessStatus);
+  const recoveryMissingToday = missingTodayCheckIn(state, options.today);
   const progression = options.progressionResult ?? evaluateProgression(weeklyProgressionInput(state, options.today, readiness, nutrition.adherence));
   const goalTracking = options.goalTrackingResult ?? evaluateGoalTracking({
     evaluationDate: options.today,
@@ -419,7 +424,9 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
       physiqueGoalName: "Greek God physique",
     },
   });
-  const confidenceCard = compactDataQuality(readiness, progression, goalTracking, nutrition.adherence);
+  const confidenceCard = recoveryMissingToday
+    ? { label: "Data Quality" as const, value: "Low" as const, reason: "Today's daily check-in is missing. Prior-day recovery is not carried forward." }
+    : compactDataQuality(readiness, progression, goalTracking, nutrition.adherence);
   const trainingEngine = evaluateTraining({
     currentDate: options.today,
     trainingPlan: null,
@@ -501,9 +508,9 @@ export function buildHomeCommandCenter(state: AppState, options: HomeCommandCent
     progressionEngineResult: progression,
     goalTrackingEngineResult: goalTracking,
     recovery: {
-      readiness: readiness.status,
-      confidence: readiness.confidence,
-      warning: firstRecoveryWarning(readiness),
+      readiness: recoveryMissingToday ? "Missing" : readiness.status,
+      confidence: recoveryMissingToday ? "Low" : readiness.confidence,
+      warning: recoveryMissingToday ? "Today's recovery check-in is missing. Complete Daily Check-In before treating recovery as current." : firstRecoveryWarning(readiness),
     },
     confidenceCards: [confidenceCard],
     sundayPrompt: sundayPrompt(state, options.today),

@@ -119,6 +119,15 @@ test("keeps coach recommendation concise for quick mission scanning", () => {
   assert.ok(result.coachRecommendation.includes("Regress: 2 mi"));
 });
 
+test("does not reuse prior-day check-in as today's Home recovery status", () => {
+  const result = model({ checkIns: [checkIn({ date: "2026-06-01", sleepHours: 8, energy: 9 })] }, "2026-06-02");
+
+  assert.equal(result.recovery.readiness, "Missing");
+  assert.equal(result.recovery.confidence, "Low");
+  assert.match(result.recovery.warning ?? "", /today/i);
+  assert.match(result.confidenceCards[0].reason, /daily check-in/i);
+});
+
 test("generates Today's Goals dynamically from safety, recovery, training, nutrition, and goal signals", () => {
   const result = model({ checkIns: [checkIn({ date: "2026-06-01", pain: true, painSeverity: 7, painLocation: "knee", sleepHours: 5.5 })] });
 
